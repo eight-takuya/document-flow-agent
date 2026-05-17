@@ -18,6 +18,10 @@ processing/*
 
 processing/review-required/*
 !processing/review-required/.gitkeep
+!processing/review-required/applied/
+
+processing/review-required/applied/*
+!processing/review-required/applied/.gitkeep
 
 processing/renamed/*
 !processing/renamed/.gitkeep

@@ -71,11 +71,18 @@ PDF / 画像ファイル
         ↓
 [Review]  ← 人間 / Claude Cowork による確認
   - ocr-error: PDF を開いて文字化けを修正
-  - review-required: python scripts/review_server.py を起動
-      → http://localhost:8765 でレポートが開く
-      1. 各カードのラジオボタンで OK / 修正 / 廃棄 を選択
-      2. 「保存」ボタン押下 → review-decisions.json が自動保存される
-      3. python scripts/apply_review_decisions.py を実行
+  - review-required: process_inbox.py 実行後にレビューサーバーが自動起動する
+      表示例:
+        Review required: 1 file(s)
+        Review server running: http://localhost:8765
+        If browser does not open automatically, run:
+          open http://localhost:8765
+      手動起動: python scripts/review_server.py
+      1. ブラウザで http://localhost:8765 を開く
+      2. 各カードのラジオボタンで OK / 修正 / 廃棄 を選択
+      3. 「保存」ボタン押下 → review-decisions.json が自動保存される
+      4. python scripts/apply_review_decisions.py を実行
+         → 処理後に review-decisions.json は applied/ へ自動移動（再適用防止）
   - 廃棄対象: inbox から手動削除してログに記録
         |
         ↓

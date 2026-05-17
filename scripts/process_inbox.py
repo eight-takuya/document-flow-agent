@@ -767,7 +767,7 @@ def _launch_review_server(review_count: int) -> None:
     review-required がある場合にレビューサーバーを起動してブラウザを開く。
 
     ポートが既に使用中の場合は既存サーバーが動いていると判断し、
-    ブラウザだけ開く。
+    ブラウザだけ開く。webbrowser.open() が失敗しても処理は止まらない。
     """
     url = f"http://localhost:{REVIEW_SERVER_PORT}"
 
@@ -776,27 +776,28 @@ def _launch_review_server(review_count: int) -> None:
 
     if _port_in_use(REVIEW_SERVER_PORT):
         print(f"  既存のレビューサーバーを検出しました（ポート {REVIEW_SERVER_PORT}）")
-        print(f"  Opening browser: {url}")
+    else:
+        print("  Starting review server...")
+        subprocess.Popen(
+            [sys.executable, str(REVIEW_SERVER_SCRIPT), "--no-browser",
+             "--port", str(REVIEW_SERVER_PORT)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        # サーバーが起動するまで最大3秒待つ
+        for _ in range(15):
+            time.sleep(0.2)
+            if _port_in_use(REVIEW_SERVER_PORT):
+                break
+
+    print(f"  Review server running: {url}")
+    print(f"  If browser does not open automatically, run:")
+    print(f"    open {url}")
+    try:
         webbrowser.open(url)
-        return
-
-    print("  Starting review server...")
-    subprocess.Popen(
-        [sys.executable, str(REVIEW_SERVER_SCRIPT), "--no-browser",
-         "--port", str(REVIEW_SERVER_PORT)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-    )
-
-    # サーバーが起動するまで最大3秒待つ
-    for _ in range(15):
-        time.sleep(0.2)
-        if _port_in_use(REVIEW_SERVER_PORT):
-            break
-
-    print(f"  Opening browser: {url}")
-    webbrowser.open(url)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -957,8 +958,17 @@ def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
             print("  3. OCR エラー / review 対象は review-report-*.html を開いて手動対応")
         print("  4. docs/export-rules.md の条件を満たしたら export/ または archive/ へ")
 
-    if review_needed and open_review:
-        _launch_review_server(len(review_needed))
+    if review_needed:
+        if open_review:
+            _launch_review_server(len(review_needed))
+        else:
+            # --no-open-review でも URL は常に表示する
+            url = f"http://localhost:{REVIEW_SERVER_PORT}"
+            print()
+            print(f"  Review required: {len(review_needed)} file(s)")
+            print(f"  To start review server: python scripts/review_server.py")
+            print(f"  Then open: {url}")
+            print(f"  Or run:    open {url}")
 
 
 # ---------------------------------------------------------------------------

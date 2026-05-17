@@ -97,11 +97,21 @@ dry-run の結果を確認する。
 
 #### 4b — review-required 対応（ローカルサーバー経由で保存）
 
-```bash
-python scripts/review_server.py
+`process_inbox.py` 実行時に review-required が発生すると、自動的にレビューサーバーが起動し以下が表示されます:
+
+```
+  Review required: 1 file(s)
+  Review server running: http://localhost:8765
+  If browser does not open automatically, run:
+    open http://localhost:8765
 ```
 
-起動後 `http://localhost:8765` が自動で開く。
+ブラウザが自動で開かない場合（Claude Code 環境など）は手動で開いてください:
+
+```bash
+python scripts/review_server.py   # サーバーを単体起動する場合
+open http://localhost:8765        # ブラウザを手動で開く
+```
 
 1. 各ファイルのカードに表示された OCR rename 候補と警告を確認する
 2. 各カードのラジオボタンで判断を選ぶ:
@@ -115,7 +125,8 @@ python scripts/review_server.py
 python scripts/apply_review_decisions.py
 ```
 
-5. 廃棄判断したファイルは inbox から手動削除してログに記録する
+5. 適用後、`review-decisions.json` は `processing/review-required/applied/` へ自動移動される（再適用防止）
+6. 廃棄判断したファイルは inbox から手動削除してログに記録する
 
 > **サーバーを使わない場合:** 「コピー」ボタンで JSON をクリップボードに取得し、  
 > `processing/review-required/review-decisions.json` にテキストエディタで貼り付けて保存する。
