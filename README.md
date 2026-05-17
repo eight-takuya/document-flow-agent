@@ -64,34 +64,49 @@ python scripts/normalize_documents.py
 
 ファイル一覧・文字化け検出・リネームヒントを表示する（ファイルは動かさない）。
 
-### Step 3 — analyze（分析・レポート生成）
+### Step 3 — analyze / dry-run（分析・レポート生成）
 
 ```bash
-python scripts/process_inbox.py
+python scripts/process_inbox.py          # デフォルトは --dry-run
+python scripts/process_inbox.py --dry-run
 ```
 
-rename 候補を提示し、OCR エラー・要確認ファイルをレポートとして書き出す。
+**`--dry-run` がデフォルト。ファイルは一切変更しない。**
 
+- rename 候補を表示（ベストエフォートで日付・ファイル名を整形）
 - 文字化け疑い → `processing/ocr-error/` にレポート
 - 要確認 → `processing/review-required/` にレポート
-
-**inbox のファイルは動かさない。**
+- 実行ログ → `logs/process-inbox-YYYYMMDD-HHMMSS.log`
 
 ### Step 4 — review（人間 + Claude Cowork による確認）
 
-- `ocr-error/` レポートを確認 → PDF を開いて文字化けを修正
-- `review-required/` レポートを確認 → Category を決定
+dry-run の結果を確認する。
+
+- `ocr-error/` レポートのファイルは PDF を開いて文字化けを修正
+- `review-required/` レポートのファイルは内容を確認して Category を決定
 - 廃棄対象は inbox から削除
 
-### Step 5 — rename → metadata 生成
+### Step 5 — apply（safe copy + metadata 自動生成）
 
-確認済みファイルを命名規約のファイル名で `processing/renamed/` へ手動コピー後:
+review 不要と判断したら `--apply` を実行する。
 
 ```bash
-python scripts/generate_metadata.py
+python scripts/process_inbox.py --apply
 ```
 
-`processing/metadata-ready/` に `.metadata.json` が生成される。metadata を目視確認・補完する。
+- **review 不要ファイルのみ** `processing/renamed/` へコピー（inbox は残る）
+- OCR エラー・review 必要なファイルは `--apply` でも処理対象外
+- 同名ファイルは上書きせず連番（`-001`, `-002`）を付与
+- 同時に `processing/metadata-ready/` に `.metadata.json` を自動生成
+- metadata の `category` 欄は空（人間が後で補完）
+
+### Step 6 — metadata 補完
+
+`processing/metadata-ready/` の `.metadata.json` を開いて不足項目を補完する。
+
+```bash
+python scripts/generate_metadata.py  # renamed/ に残ったファイルの分を追加生成
+```
 
 ### Step 6 — export または archive へ移動（人間による最終確認）
 

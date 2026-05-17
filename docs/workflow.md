@@ -20,29 +20,42 @@ Claude Cowork が月次運用を行う際の手順書として使用してくだ
         | → ファイル一覧・文字化け検出・リネームヒント表示
         |
         ↓
-[Normalize & Analyze]
-  python scripts/process_inbox.py
-  → rename 候補提示
+[Dry-run]  ← デフォルト。必ず先に実行する
+  python scripts/process_inbox.py --dry-run
+  → rename 候補を表示（ファイルは変更しない）
   → OCR エラー検出 → processing/ocr-error/ にレポート
   → review 要否判定 → processing/review-required/ にレポート
+  → ログ → logs/process-inbox-YYYYMMDD-HHMMSS.log
         |
         ↓
 [Review]  ← 人間 / Claude Cowork による確認
   - ocr-error: PDF を開いて文字化けを修正
   - review-required: 内容確認・Category 決定
   - 廃棄対象: inbox から削除してログに記録
+  - 問題なければ --apply を実行してよいと判断する
         |
-        | 手動コピー（inbox のファイルは削除しない）
         ↓
-[Rename]
-  processing/renamed/ に命名規約ファイル名でコピー
+[Apply]  ← 人間確認後のみ実行
+  python scripts/process_inbox.py --apply
+  → review 不要ファイルのみ processing/renamed/ へコピー
+  → inbox の元ファイルは残す（削除しない）
+  → 同名ファイルは -001, -002 ... で連番付与（上書きなし）
+  → metadata scaffold を processing/metadata-ready/ へ自動生成
+        |
+        ↓
+[Rename 補完]  ← 人間 / Claude Cowork
+  processing/renamed/ のファイル名を確認
+  Category を正式なものに手動で補完する
   命名規約: YYYYMMDD-Category-Document-[Counterparty]-[AmountJPY]-[PaymentMethod].pdf
         |
-        | python scripts/generate_metadata.py
+        | python scripts/generate_metadata.py（残り分の補完）
         ↓
-[Metadata]
-  processing/metadata-ready/ に .metadata.json を生成
-  metadata を目視確認・補完（Counterparty・金額・廃棄日など）
+[Metadata 補完]
+  processing/metadata-ready/ の .metadata.json を確認・補完
+  - category（必須）
+  - counterparty（あれば）
+  - amount_jpy / payment_method（あれば）
+  - discard_date（保存期間から計算）
         |
         | 人間による最終確認（docs/export-rules.md の条件を満たしたか確認）
         ↓
@@ -73,10 +86,11 @@ Claude Cowork が月次運用を行う際の手順書として使用してくだ
 | Capture | **Human** | iPhone でスキャン・撮影 |
 | Inbox | **Human** | inbox/ にファイルを配置 |
 | Normalize | **Claude Cowork** | `normalize_documents.py` 実行・結果確認 |
-| Analyze | **Claude Cowork** | `process_inbox.py` 実行・レポート確認 |
+| Dry-run | **Claude Cowork** | `process_inbox.py --dry-run` 実行・レポート確認 |
 | Review | **Human + Claude Cowork** | 文字化け修正・Category 決定・廃棄判断 |
-| Rename | **Claude Cowork** | 命名規約に従ってファイルを renamed/ へコピー |
-| Metadata | **Claude Cowork** | `generate_metadata.py` 実行・metadata 補完 |
+| Apply | **Human 確認後に Claude Cowork** | `process_inbox.py --apply` で safe copy + metadata 自動生成 |
+| Rename 補完 | **Human / Claude Cowork** | renamed/ のファイル名に Category を手動追加 |
+| Metadata 補完 | **Claude Cowork** | `.metadata.json` を開いて category 等を補完 |
 | Export Buffer | **Human** | export-rules を確認して export/ または archive/ へ移動 |
 | Dropbox | **Human** | 月次で export/ → Dropbox へ手動転送 |
 | Notion | **Human** | 重要ファイルのみ登録 |
@@ -87,17 +101,36 @@ Claude Cowork が月次運用を行う際の手順書として使用してくだ
 ## 月次運用チェックリスト（Claude Cowork 向け）
 
 ```
-[ ] 1. normalize_documents.py を実行して inbox のファイル一覧を確認
-[ ] 2. process_inbox.py を実行して分析レポートを生成
-[ ] 3. ocr-error/ レポートを確認 → 文字化けファイルを目視修正
-[ ] 4. review-required/ レポートを確認 → Category を決定
-[ ] 5. 廃棄対象ファイルを inbox から削除（ログに記録）
-[ ] 6. 残りのファイルを renamed/ へ手動コピー（命名規約のファイル名で）
-[ ] 7. generate_metadata.py を実行して metadata scaffold を生成
-[ ] 8. metadata-ready/ の .metadata.json を開いて不足項目を補完
-[ ] 9. docs/export-rules.md の export 可能条件を確認
+[ ] 1.  python scripts/normalize_documents.py
+        → inbox のファイル一覧・文字化け検出を確認
+
+[ ] 2.  python scripts/process_inbox.py --dry-run
+        → rename 候補・ocr-error・review-required を確認（ファイルは変更されない）
+
+[ ] 3.  processing/ocr-error/ のレポートを確認
+        → 該当 PDF を開いて文字化けを修正 → 手動で renamed/ へコピー
+
+[ ] 4.  processing/review-required/ のレポートを確認
+        → 内容確認・Category を決定 → 修正後に renamed/ へ手動コピー
+
+[ ] 5.  廃棄対象を inbox から削除（ログに「廃棄」として記録）
+
+[ ] 6.  python scripts/process_inbox.py --apply
+        → review 不要ファイルを renamed/ へ safe copy
+        → metadata scaffold を metadata-ready/ へ自動生成
+
+[ ] 7.  processing/renamed/ のファイル名を確認
+        → Category が入っていないファイルはファイル名を手動で修正
+
+[ ] 8.  processing/metadata-ready/ の .metadata.json を開いて不足項目を補完
+        → category, counterparty, discard_date など
+
+[ ] 9.  docs/export-rules.md の export 可能条件をすべて確認
+
 [ ] 10. 条件を満たしたファイルを export/ または archive/ へ移動
-[ ] 11. export/ が Dropbox へ転送済みか確認（月次手動作業）
+
+[ ] 11. export/ の内容を Dropbox の 99_Imported/ へ月次手動転送
+
 [ ] 12. 重要ファイルを Notion に登録
 ```
 
