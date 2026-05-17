@@ -65,6 +65,8 @@ PDF / 画像ファイル
   → OCR エラー検出 → processing/ocr-error/ にレポート
   → review 要否判定 → processing/review-required/ にレポート
   → ログ → logs/process-inbox-YYYYMMDD-HHMMSS.log
+  → review-required が1件以上ある場合はレビューサーバーを自動起動してブラウザを開く
+     （--no-open-review で無効化できる）
         |
         ↓
 [Review]  ← 人間 / Claude Cowork による確認

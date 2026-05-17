@@ -20,7 +20,11 @@ import html as html_module
 import json
 import re
 import shutil
+import socket
+import subprocess
 import sys
+import time
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -744,10 +748,62 @@ def _sep(char: str = "=", width: int = 60) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Review server launcher
+# ---------------------------------------------------------------------------
+
+REVIEW_SERVER_PORT = 8765
+REVIEW_SERVER_SCRIPT = Path(__file__).parent / "review_server.py"
+
+
+def _port_in_use(port: int) -> bool:
+    """指定ポートが既に使用中かを確認する。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.3)
+        return s.connect_ex(("localhost", port)) == 0
+
+
+def _launch_review_server(review_count: int) -> None:
+    """
+    review-required がある場合にレビューサーバーを起動してブラウザを開く。
+
+    ポートが既に使用中の場合は既存サーバーが動いていると判断し、
+    ブラウザだけ開く。
+    """
+    url = f"http://localhost:{REVIEW_SERVER_PORT}"
+
+    print()
+    print(f"  Review required: {review_count} file(s)")
+
+    if _port_in_use(REVIEW_SERVER_PORT):
+        print(f"  既存のレビューサーバーを検出しました（ポート {REVIEW_SERVER_PORT}）")
+        print(f"  Opening browser: {url}")
+        webbrowser.open(url)
+        return
+
+    print("  Starting review server...")
+    subprocess.Popen(
+        [sys.executable, str(REVIEW_SERVER_SCRIPT), "--no-browser",
+         "--port", str(REVIEW_SERVER_PORT)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+
+    # サーバーが起動するまで最大3秒待つ
+    for _ in range(15):
+        time.sleep(0.2)
+        if _port_in_use(REVIEW_SERVER_PORT):
+            break
+
+    print(f"  Opening browser: {url}")
+    webbrowser.open(url)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def run(apply: bool, use_ocr: bool) -> None:
+def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
     mode = "apply" if apply else "dry-run"
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -884,15 +940,25 @@ def run(apply: bool, use_ocr: bool) -> None:
     if not apply:
         print("Next steps:")
         print("  1. rename 候補（OCR推定）を確認し、問題なければ --apply を実行")
-        print("  2. OCR エラー / review 対象は review-report-*.html を開いて確認")
-        print("     → 人間確認後に --apply-review（将来実装）で反映")
+        if review_needed:
+            print("  2. レビュー画面で OK / 修正 / 廃棄 を選択し「保存」ボタンを押す")
+            print("     → python scripts/apply_review_decisions.py で反映")
+        else:
+            print("  2. OCR エラー / review 対象は review-report-*.html を開いて確認")
         print("  3. python scripts/process_inbox.py --apply で safe copy 実行")
     else:
         print("Next steps:")
         print("  1. processing/renamed/ のファイル名を確認・必要なら Category を手修正")
         print("  2. processing/metadata-ready/ の .metadata.json で category 等を補完")
-        print("  3. OCR エラー / review 対象は review-report-*.html を開いて手動対応")
+        if review_needed:
+            print("  3. レビュー画面で OK / 修正 / 廃棄 を選択し「保存」ボタンを押す")
+            print("     → python scripts/apply_review_decisions.py で反映")
+        else:
+            print("  3. OCR エラー / review 対象は review-report-*.html を開いて手動対応")
         print("  4. docs/export-rules.md の条件を満たしたら export/ または archive/ へ")
+
+    if review_needed and open_review:
+        _launch_review_server(len(review_needed))
 
 
 # ---------------------------------------------------------------------------
@@ -905,16 +971,29 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  python scripts/process_inbox.py              # dry-run + OCR（デフォルト）
-  python scripts/process_inbox.py --dry-run    # 同上
-  python scripts/process_inbox.py --no-ocr     # OCR なしで高速に実行
-  python scripts/process_inbox.py --apply      # renamed/ へ safe copy + metadata 生成
+  python scripts/process_inbox.py                   # dry-run + OCR（デフォルト）
+  python scripts/process_inbox.py --dry-run         # 同上
+  python scripts/process_inbox.py --no-ocr          # OCR なしで高速に実行
+  python scripts/process_inbox.py --apply           # renamed/ へ safe copy + metadata 生成
+  python scripts/process_inbox.py --no-open-review  # レビュー画面を自動起動しない
         """,
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--dry-run", action="store_true", default=False)
     mode_group.add_argument("--apply", action="store_true", default=False)
     parser.add_argument("--no-ocr", action="store_true", default=False, help="OCR をスキップ")
+
+    review_group = parser.add_mutually_exclusive_group()
+    review_group.add_argument(
+        "--open-review", action="store_true", default=False,
+        help="review-required があればレビュー画面を自動起動（デフォルト動作）",
+    )
+    review_group.add_argument(
+        "--no-open-review", action="store_true", default=False,
+        help="review-required があってもレビュー画面を自動起動しない",
+    )
     args = parser.parse_args()
 
-    run(apply=args.apply, use_ocr=not args.no_ocr)
+    # --no-open-review が明示された場合のみ無効化。それ以外はデフォルトで自動起動
+    open_review = not args.no_open_review
+    run(apply=args.apply, use_ocr=not args.no_ocr, open_review=open_review)

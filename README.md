@@ -67,9 +67,10 @@ python scripts/normalize_documents.py
 ### Step 3 — analyze / dry-run（OCR分析・レポート生成）
 
 ```bash
-python scripts/process_inbox.py          # デフォルトは --dry-run + OCR
-python scripts/process_inbox.py --dry-run
-python scripts/process_inbox.py --no-ocr # OCR なしで高速実行
+python scripts/process_inbox.py                   # デフォルトは --dry-run + OCR
+python scripts/process_inbox.py --dry-run         # 同上
+python scripts/process_inbox.py --no-ocr          # OCR なしで高速実行
+python scripts/process_inbox.py --no-open-review  # レビュー画面を自動起動しない
 ```
 
 **`--dry-run` がデフォルト。ファイルは一切変更しない。**
@@ -78,6 +79,7 @@ python scripts/process_inbox.py --no-ocr # OCR なしで高速実行
 - rename 候補フォーマット: `YYYYMMDD-Category-Document-Counterparty.pdf`
 - 文字化け疑い → `processing/ocr-error/` に JSON / Markdown / HTML レポートを生成
 - 要確認 → `processing/review-required/` に JSON / Markdown / HTML レポートを生成
+- **review-required が 1 件以上ある場合はレビューサーバーを自動起動し、ブラウザでレビュー画面を開く**
 - 実行ログ → `logs/process-inbox-YYYYMMDD-HHMMSS.log`
 
 **レポートの使い分け**
