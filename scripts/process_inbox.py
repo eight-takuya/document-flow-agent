@@ -483,7 +483,12 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
   input[type=text] {{ border: 1px solid #ccc; border-radius: 4px; padding: 4px 8px; font-size: 12px; }}
   code {{ background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 12px; }}
   .action-panel {{ position: sticky; bottom: 0; background: #fff; border-top: 2px solid #0071e3; padding: 16px 24px; display: flex; gap: 12px; align-items: flex-start; box-shadow: 0 -2px 8px rgba(0,0,0,.10); }}
-  .action-panel textarea {{ flex: 1; height: 120px; font-family: monospace; font-size: 12px; border: 1px solid #ccc; border-radius: 6px; padding: 8px; resize: vertical; }}
+  .action-left {{ flex: 1; display: flex; flex-direction: column; gap: 8px; }}
+  .action-panel textarea {{ width: 100%; height: 100px; font-family: monospace; font-size: 12px; border: 1px solid #ccc; border-radius: 6px; padding: 8px; resize: vertical; box-sizing: border-box; }}
+  .save-status {{ font-size: 13px; padding: 6px 10px; border-radius: 4px; min-height: 30px; display: flex; align-items: center; }}
+  .save-status.ok {{ background: #d4edda; color: #155724; }}
+  .save-status.error {{ background: #f8d7da; color: #721c24; }}
+  .save-status.saving {{ background: #fff3cd; color: #856404; }}
   .btn {{ padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; }}
   .btn-primary {{ background: #0071e3; color: #fff; }}
   .btn-primary:hover {{ background: #005bb5; }}
@@ -513,10 +518,13 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
 </div>
 
 <div class="action-panel">
-  <textarea id="json-output" readonly placeholder="「保存用JSONを生成」ボタンを押すと、判断内容がここに表示されます。&#10;生成されたJSONを scripts/apply_review_decisions.py で処理できます。"></textarea>
+  <div class="action-left">
+    <div class="save-status" id="save-status"></div>
+    <textarea id="json-output" readonly placeholder="「コピー」ボタン押下時、または保存サーバー未起動時のフォールバック用JSONがここに表示されます。&#10;python scripts/review_server.py を起動すると「保存」ボタンで直接ファイルに書き込めます。"></textarea>
+  </div>
   <div class="btn-col">
-    <button class="btn btn-primary" onclick="generateJSON()">保存用JSONを生成</button>
-    <button class="btn btn-secondary" onclick="copyJSON()">コピー</button>
+    <button class="btn btn-primary" onclick="saveReview(event)">保存</button>
+    <button class="btn btn-secondary" onclick="copyJSON(event)">コピー</button>
   </div>
 </div>
 
@@ -529,18 +537,14 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
     var selected = '';
     radios.forEach(function(r) {{ if (r.checked) selected = r.value; }});
     var customDiv = document.getElementById('custom-' + cardId);
-    if (selected === 'rename-custom') {{
-      customDiv.style.display = 'flex';
-    }} else {{
-      customDiv.style.display = 'none';
-    }}
+    customDiv.style.display = (selected === 'rename-custom') ? 'flex' : 'none';
   }}
 
-  function generateJSON() {{
+  function buildPayload() {{
     var now = new Date();
     var pad = function(n) {{ return n.toString().padStart(2, '0'); }};
     var reviewedAt = now.getFullYear() + '-' + pad(now.getMonth()+1) + '-' + pad(now.getDate()) +
-      ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+      'T' + pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
 
     var cards = document.querySelectorAll('.card[data-source-name]');
     var items = [];
@@ -584,22 +588,51 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
       }});
     }});
 
-    var output = {{ reviewed_at: reviewedAt, items: items }};
-    document.getElementById('json-output').value = JSON.stringify(output, null, 2);
+    return {{ reviewed_at: reviewedAt, items: items }};
   }}
 
-  function copyJSON() {{
-    var ta = document.getElementById('json-output');
-    if (!ta.value) {{ generateJSON(); }}
-    ta.select();
+  function saveReview(evt) {{
+    var payload = buildPayload();
+    var statusEl = document.getElementById('save-status');
+    statusEl.textContent = '保存中...';
+    statusEl.className = 'save-status saving';
+
+    fetch('/save-review', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(payload)
+    }}).then(function(res) {{ return res.json(); }})
+    .then(function(data) {{
+      if (data.ok) {{
+        statusEl.textContent = '保存しました → ' + data.path;
+        statusEl.className = 'save-status ok';
+        document.getElementById('json-output').value = JSON.stringify(payload, null, 2);
+      }} else {{
+        throw new Error(data.error || '不明なエラー');
+      }}
+    }}).catch(function(err) {{
+      statusEl.textContent = '保存失敗: ' + err.message + ' — サーバー未起動の場合は「コピー」を使用してください';
+      statusEl.className = 'save-status error';
+      document.getElementById('json-output').value = JSON.stringify(payload, null, 2);
+    }});
+  }}
+
+  function copyJSON(evt) {{
+    var payload = buildPayload();
+    var json = JSON.stringify(payload, null, 2);
+    document.getElementById('json-output').value = json;
     try {{
-      navigator.clipboard.writeText(ta.value).catch(function() {{
+      navigator.clipboard.writeText(json).catch(function() {{
+        var ta = document.getElementById('json-output');
+        ta.select();
         document.execCommand('copy');
       }});
     }} catch(e) {{
+      var ta = document.getElementById('json-output');
+      ta.select();
       document.execCommand('copy');
     }}
-    var btn = event.target;
+    var btn = evt.target;
     var orig = btn.textContent;
     btn.textContent = 'コピーしました';
     setTimeout(function() {{ btn.textContent = orig; }}, 1500);

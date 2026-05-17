@@ -93,23 +93,30 @@ dry-run の結果を確認する。
 
 `processing/ocr-error/` レポートを確認し、該当 PDF を開いて文字化けを手動修正する。
 
-#### 4b — review-required 対応（HTML レポートで判断入力）
+#### 4b — review-required 対応（ローカルサーバー経由で保存）
 
-1. `processing/review-required/` にある `review-report-*.html` をブラウザで開く
-2. 各ファイルのカードに表示された OCR rename 候補と警告を確認する
-3. 各カードのラジオボタンで判断を選ぶ:
+```bash
+python scripts/review_server.py
+```
+
+起動後 `http://localhost:8765` が自動で開く。
+
+1. 各ファイルのカードに表示された OCR rename 候補と警告を確認する
+2. 各カードのラジオボタンで判断を選ぶ:
    - **OK** — OCR 候補のまま rename する
-   - **修正** — ファイル名を編集して rename する
+   - **修正** — ファイル名を編集して rename する（入力欄に OCR 候補が初期値として入る）
    - **廃棄** — このファイルは保管不要
-4. 「保存用JSONを生成」ボタンを押して JSON を生成する
-5. 生成された JSON を `processing/review-required/review-decisions.json` に保存する
-6. 以下を実行して rename / metadata 生成を適用する:
+3. 「**保存**」ボタンを押す → `processing/review-required/review-decisions.json` に自動保存
+4. 以下を実行して rename / metadata 生成を適用する:
 
 ```bash
 python scripts/apply_review_decisions.py
 ```
 
-7. 廃棄判断したファイルは inbox から手動削除してログに記録する
+5. 廃棄判断したファイルは inbox から手動削除してログに記録する
+
+> **サーバーを使わない場合:** 「コピー」ボタンで JSON をクリップボードに取得し、  
+> `processing/review-required/review-decisions.json` にテキストエディタで貼り付けて保存する。
 
 ### Step 5 — apply（safe copy + metadata 自動生成）
 
@@ -209,6 +216,7 @@ Category 一覧は [`docs/categories.md`](docs/categories.md)、支払手段は 
 | `process_inbox.py` | 分析・rename 候補・レポート生成 | normalize の次 |
 | `rename_documents.py` | 命名規約のファイル名生成・検証 | rename 時に参照 |
 | `generate_metadata.py` | metadata scaffold 生成 | renamed/ 配置後 |
+| `review_server.py` | review-report HTML 表示・保存用ローカルサーバー | review-required 確認時 |
 | `apply_review_decisions.py` | review-decisions.json を処理して rename/discard/skip を実行 | review HTML 確認後 |
 | `export_to_dropbox.py` | export/ → Dropbox 転送 | 月次・手動 |
 | `scan_inbox_watcher.py` | inbox 監視（将来実装） | 常駐 |
