@@ -340,12 +340,30 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
             f'<li class="warn">⚠ {esc(w)}</li>' for w in item["warnings"]
         ) if item["warnings"] else "<li>—</li>"
 
-        fields = item.get("ocr_fields", {})
-        fields_rows = ""
-        if fields:
-            for k, v in fields.items():
-                if v:
-                    fields_rows += f"<tr><td>{esc(k)}</td><td>{esc(str(v))}</td></tr>"
+        fields = item.get("ocr_fields", {}) or {}
+        ocr_ran = bool(fields or item.get("ocr_text"))
+
+        # Standard field definitions: (key, Japanese label)
+        FIELD_DEFS = [
+            ("date",           "日付"),
+            ("category",       "カテゴリ"),
+            ("document",       "書類名"),
+            ("counterparty",   "取引先"),
+            ("amount_jpy",     "金額（円）"),
+            ("payment_method", "支払手段"),
+        ]
+        if ocr_ran:
+            fields_rows = "".join(
+                f"<tr><td>{label}</td><td>{esc(str(fields.get(key) or '—'))}</td></tr>"
+                for key, label in FIELD_DEFS
+            )
+            ocr_section_label = "OCR 推定フィールド"
+        else:
+            fields_rows = "<tr><td colspan='2' style='color:#aaa;font-style:italic;'>OCR 未実行（--no-ocr オプション使用 または テキスト抽出不可）</td></tr>"
+            ocr_section_label = "OCR 推定フィールド（未実行）"
+
+        # JSON-encode fields for data attribute (ensure_ascii=True → safe for HTML attribute)
+        fields_json_esc = esc(json.dumps(fields, ensure_ascii=True))
 
         ocr_text = esc(item.get("ocr_text", "")) or "（OCR テキストなし）"
         ocr_snippet = ocr_text[:600]
@@ -354,7 +372,10 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
         card_id = f"card-{len(cards)}"
 
         cards.append(f"""
-  <div class="card {status_cls}" id="{card_id}" data-source-name="{name}" data-rename-candidate="{rename}">
+  <div class="card {status_cls}" id="{card_id}"
+       data-source-name="{name}"
+       data-rename-candidate="{rename}"
+       data-ocr-fields="{fields_json_esc}">
     <div class="card-header">
       <span class="badge {'badge-ocr' if item.get('needs_ocr_review') else 'badge-review'}">
         {'OCR ERROR' if item.get('needs_ocr_review') else 'REVIEW'}
@@ -372,7 +393,13 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
       <ul class="warn-list">{warnings_html}</ul>
     </div>
 
-    {"<div class='section'><div class='label'>OCR 推定フィールド</div><table class='fields'><tr><th>フィールド</th><th>推定値</th></tr>" + fields_rows + "</table></div>" if fields_rows else ""}
+    <div class="section">
+      <div class="label">{ocr_section_label}</div>
+      <table class="fields">
+        <tr><th>フィールド</th><th>推定値</th></tr>
+        {fields_rows}
+      </table>
+    </div>
 
     <details class="ocr-details">
       <summary>OCR テキスト（クリックで展開）</summary>
@@ -545,10 +572,14 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
       var notesInp = document.getElementById('notes-' + cardId);
       var notes = notesInp ? notesInp.value.trim() : '';
 
+      var ocrFields = {{}};
+      try {{ ocrFields = JSON.parse(card.dataset.ocrFields || '{{}}'); }} catch(e) {{}}
+
       items.push({{
         source_file_name: sourceName,
         decision: decision,
         approved_file_name: approvedFileName,
+        ocr_fields: ocrFields,
         notes: notes
       }});
     }});
