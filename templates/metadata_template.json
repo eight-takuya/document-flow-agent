@@ -1,10 +1,18 @@
 {
   "title": "",
+  "file_name": "",
+  "source_file_name": "",
+  "file_type": "",
   "category": "",
-  "retention": "",
-  "event_date": "",
-  "discard_date": "",
+  "document": "",
   "counterparty": "",
+  "event_date": "",
+  "amount_jpy": null,
+  "payment_method": "",
+  "retention": "",
+  "discard_date": "",
   "status": "",
-  "notion_registered": false
+  "notion_registered": false,
+  "dropbox_exported": false,
+  "notes": ""
 }

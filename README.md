@@ -72,10 +72,62 @@ Claude Cowork を起動し、inbox のファイルを確認。
 
 ---
 
+## フォルダ別方針
+
+### inbox — 自由な入口
+
+`inbox/` は整理の入口です。完璧なファイル名・形式は求めません。
+
+- 受け入れる形式: `.pdf` `.png` `.jpg` `.jpeg`
+- ファイル名は仮のままでよい（例: `scan_20260517.pdf`、`IMG_1234.jpg`）
+- iPhone スキャン・カメラ撮影・メール添付など何でも投入する
+- inbox にあるファイルはスクリプトで変更しない（読み取り専用扱い）
+
+ファイルの状態を確認するには:
+
+```bash
+python scripts/normalize_documents.py
+```
+
+---
+
+### processing — 整える場所
+
+`processing/` は分類・変換・リネームを行う一時領域です。
+
+- **OCR**: 画像・スキャン PDF からテキストを抽出する
+- **PDF 化**: `.png` / `.jpg` / `.jpeg` を PDF に変換する
+- **リネーム**: `docs/naming-convention.md` の命名規約を適用する（`scripts/rename_documents.py` 参照）
+- **metadata 生成**: `templates/metadata_template.json` に基づき `.json` を作成する
+
+処理後は `archive/` または `export/` へ移動する。
+
+---
+
+### archive / export — 整理済みバッファ
+
+- `archive/`: ローカルに残す整理済みファイル。原則 PDF 形式
+- `export/`: Dropbox への移動を待つ確定ファイル。月次で手動移動する
+- どちらも命名規約が適用済みの状態で格納する
+
+---
+
+## 命名規約
+
+```
+YYYYMMDD-Category-Document-Counterparty-AmountJPY-PaymentMethod.pdf
+```
+
+詳細は [`docs/naming-convention.md`](docs/naming-convention.md) を参照。  
+Category 一覧は [`docs/categories.md`](docs/categories.md)、支払手段は [`docs/payment-methods.md`](docs/payment-methods.md) を参照。
+
+---
+
 ## 運用ルール（Claude Cowork 向け）
 
-- inbox にファイルがある場合、最初に一覧を確認してから処理を開始する
-- ファイル名は `YYYYMMDD_カテゴリ_相手先_概要.pdf` 形式を推奨
+- inbox にファイルがある場合、最初に `python scripts/normalize_documents.py` で一覧を確認してから処理を開始する
+- 分類・リネームは `docs/naming-convention.md` と `docs/categories.md` を参照する
 - 判断できないファイルは `processing/` に留め置き、コメントをログに残す
 - `logs/` には処理日時・ファイル名・アクションを記録する
 - 月次処理後、`export/` が空になっていることを確認する
+- `Other` カテゴリが溜まってきたら新しい Category 追加を検討する
