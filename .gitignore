@@ -37,3 +37,11 @@ archive/*
 
 export/*
 !export/.gitkeep
+!export/files/
+!export/metadata/
+
+export/files/*
+!export/files/.gitkeep
+
+export/metadata/*
+!export/metadata/.gitkeep

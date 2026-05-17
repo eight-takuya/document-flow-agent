@@ -153,16 +153,47 @@ python scripts/process_inbox.py --apply
 python scripts/generate_metadata.py  # renamed/ に残ったファイルの分を追加生成
 ```
 
-### Step 6 — export または archive へ移動（人間による最終確認）
+### Step 6 — export 準備確認と export/ へのコピー
 
-[`docs/export-rules.md`](docs/export-rules.md) の export 可能条件を満たしたものを移動する。
+#### export 可能条件
 
-- ローカル保管 → `archive/`
-- Dropbox 送出予定 → `export/`
+- `review-decisions.json` が残っていない（apply 済み）
+- `processing/renamed/` に PDF が存在する
+- `processing/metadata-ready/` に metadata JSON が存在する
+
+まず export 可能か判定します:
+
+```bash
+python3 scripts/check_export_ready.py
+```
+
+出力例:
+```
+[OK]      review-required decisions applied
+[OK]      renamed files found: 13
+[OK]      metadata files found: 16
+[WARNING] ocr-error files remain: 3 (手動対応が必要です)
+
+Export ready: YES
+```
+
+`Export ready: YES` になったら export を実行します:
+
+```bash
+python3 scripts/export_to_dropbox.py --local --dry-run  # 確認のみ（ファイル変更なし）
+python3 scripts/export_to_dropbox.py --local            # 実際にコピー
+```
+
+コピー先:
+- `processing/renamed/*.pdf` → `export/files/`
+- `processing/metadata-ready/*.metadata.json` → `export/metadata/`
+
+> **ocr-error** が残っていても WARNING 扱いで export 可能です。  
+> **review-decisions.json** が残っている場合は export 不可（`apply_review_decisions.py` を先に実行）。
 
 ### Step 7 — 月次で Dropbox へ手動転送
 
-`export/` の内容を Dropbox の `00_DocumentVault/99_Imported/` へ手動移動する。
+`export/files/` と `export/metadata/` の内容を Dropbox の `00_DocumentVault/99_Imported/` へ手動移動する。
 
 ### Step 8 — 重要なもののみ Notion に登録
 
@@ -231,7 +262,8 @@ Category 一覧は [`docs/categories.md`](docs/categories.md)、支払手段は 
 | `generate_metadata.py` | metadata scaffold 生成 | renamed/ 配置後 |
 | `review_server.py` | review-report HTML 表示・保存用ローカルサーバー | review-required 確認時 |
 | `apply_review_decisions.py` | review-decisions.json を処理して rename/discard/skip を実行 | review HTML 確認後 |
-| `export_to_dropbox.py` | export/ → Dropbox 転送 | 月次・手動 |
+| `check_export_ready.py` | export 可能か判定（review 残・renamed 有無・metadata 対応） | export 前 |
+| `export_to_dropbox.py` | renamed/ と metadata-ready/ を export/ へコピー（--local） | check 後 |
 | `scan_inbox_watcher.py` | inbox 監視（将来実装） | 常駐 |
 
 ---

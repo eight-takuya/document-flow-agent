@@ -1,54 +1,181 @@
 """
 export_to_dropbox.py
 
-export/ 内のファイルを Dropbox の 99_Imported/ へ移動する。
-Dropbox のローカル同期フォルダを直接操作することを想定。
+processing/renamed/ と processing/metadata-ready/ のファイルを export/ へコピーする。
+月次で export/ を手動で Dropbox へ移動する運用を想定。
+
+Usage:
+    python scripts/export_to_dropbox.py --local           # export/ へコピー（デフォルト）
+    python scripts/export_to_dropbox.py --local --dry-run # コピーせずに確認のみ
+
+export/ 構成:
+    export/
+    ├── files/      # renamed/ からコピーした PDF
+    └── metadata/   # metadata-ready/ からコピーした .metadata.json
+
+安全設計:
+    - 元ファイル（processing/renamed/, processing/metadata-ready/）は削除しない
+    - 同名ファイルがある場合は -001, -002 ... の連番で safe copy
+    - review-decisions.json が残っている場合は export 不可（check_export_ready を呼ぶ）
+    - dry-run では一切ファイルを変更しない
 """
 
+import argparse
+import json
+import logging
 import shutil
+import sys
+from datetime import datetime
 from pathlib import Path
 
-EXPORT_DIR = Path(__file__).parent.parent / "export"
-LOGS_DIR = Path(__file__).parent.parent / "logs"
+ROOT = Path(__file__).parent.parent
+RENAMED_DIR = ROOT / "processing" / "renamed"
+METADATA_DIR = ROOT / "processing" / "metadata-ready"
+REVIEW_DIR = ROOT / "processing" / "review-required"
+DECISIONS_FILE = REVIEW_DIR / "review-decisions.json"
+EXPORT_DIR = ROOT / "export"
+EXPORT_FILES_DIR = EXPORT_DIR / "files"
+EXPORT_META_DIR = EXPORT_DIR / "metadata"
+LOGS_DIR = ROOT / "logs"
 
-# Dropbox ローカル同期フォルダのパス（環境に合わせて変更）
-# 例: Path.home() / "Dropbox" / "00_DocumentVault" / "99_Imported"
-DROPBOX_IMPORTED_DIR: Path | None = None
-
-
-def get_dropbox_dir() -> Path:
-    # TODO: DROPBOX_IMPORTED_DIR が None なら環境変数 DROPBOX_VAULT_PATH を参照
-    # TODO: それも未設定なら例外を raise して終了
-    raise NotImplementedError
-
-
-def list_export_files() -> list[Path]:
-    # TODO: export/ 内の PDF ファイルを一覧で返す（.gitkeep は除外）
-    raise NotImplementedError
+sys.path.insert(0, str(Path(__file__).parent))
+from check_export_ready import run as check_ready
 
 
-def copy_to_dropbox(src: Path, dest_dir: Path) -> Path:
-    # TODO: src を dest_dir へコピー（同名ファイルがあればサフィックスを付与）
-    # TODO: コピー成功後に src を削除して export/ を空にする
-    raise NotImplementedError
+def _setup_logging(timestamp: str, dry_run: bool) -> logging.Logger:
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOGS_DIR / f"export-{timestamp}.log"
+    logger = logging.getLogger(f"export_{timestamp}")
+    logger.setLevel(logging.DEBUG)
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    ch = logging.StreamHandler()
+    ch.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    mode_label = "[DRY-RUN] " if dry_run else ""
+    logger.info("%s=== export_to_dropbox 開始 ===", mode_label)
+    return logger, log_path
 
 
-def log_export(src: Path, dest: Path) -> None:
-    # TODO: logs/ に JSONL 形式でエクスポートログを追記
-    raise NotImplementedError
+def _safe_copy_dest(dest_dir: Path, filename: str) -> Path:
+    """重複時に -001, -002 ... の連番を付けた保存先パスを返す。"""
+    candidate = dest_dir / filename
+    if not candidate.exists():
+        return candidate
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    for i in range(1, 1000):
+        candidate = dest_dir / f"{stem}-{i:03d}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"空きパスが見つかりません: {filename}")
 
 
-def run(dry_run: bool = False) -> None:
-    # TODO: dry_run=True の場合はファイル移動せずログだけ出力
-    # TODO: list_export_files → copy_to_dropbox → log_export の順で処理
-    # TODO: 処理後に export/ が空であることを確認してサマリを出力
-    raise NotImplementedError
+def _collect_pdfs() -> list:
+    """renamed/ の PDF 一覧（.gitkeep 除外）。"""
+    if not RENAMED_DIR.exists():
+        return []
+    return sorted(f for f in RENAMED_DIR.glob("*.pdf") if f.name != ".gitkeep")
+
+
+def _collect_metadata() -> list:
+    """metadata-ready/ の metadata JSON 一覧。"""
+    if not METADATA_DIR.exists():
+        return []
+    return sorted(METADATA_DIR.glob("*.metadata.json"))
+
+
+def _copy_file(src: Path, dest_dir: Path, dry_run: bool, logger: logging.Logger) -> tuple:
+    """
+    src を dest_dir へ safe copy する。
+    Returns: (dest_path, skipped: bool)
+    """
+    dest = _safe_copy_dest(dest_dir, src.name)
+    if dry_run:
+        suffix = " [new]" if dest.name == src.name else f" [→ {dest.name}]"
+        logger.info("[DRY-RUN] COPY %s → %s/%s%s", src.name, dest_dir.name, dest.name, suffix)
+        return dest, False
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    suffix = "" if dest.name == src.name else f" (→ {dest.name})"
+    logger.info("COPY  %s → %s/%s%s", src.name, dest_dir.name, dest.name, suffix)
+    return dest, False
+
+
+def run_local(dry_run: bool = False) -> None:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    logger, log_path = _setup_logging(timestamp, dry_run)
+
+    # export 可能か判定
+    if DECISIONS_FILE.exists():
+        logger.error("review-decisions.json が残っています。apply_review_decisions.py を先に実行してください")
+        logger.error("  python scripts/apply_review_decisions.py")
+        sys.exit(1)
+
+    pdfs = _collect_pdfs()
+    metadata = _collect_metadata()
+
+    if not pdfs:
+        logger.error("processing/renamed/ に PDF がありません。処理対象がありません")
+        sys.exit(1)
+
+    logger.info("export 対象: PDF %d 件、metadata %d 件", len(pdfs), len(metadata))
+    if dry_run:
+        logger.info("[DRY-RUN] ファイルは変更されません")
+
+    copied_pdfs = 0
+    copied_meta = 0
+    skipped = 0
+
+    # PDF のコピー
+    logger.info("--- PDF のコピー: renamed/ → export/files/ ---")
+    for pdf in pdfs:
+        try:
+            _copy_file(pdf, EXPORT_FILES_DIR, dry_run, logger)
+            copied_pdfs += 1
+        except Exception as e:
+            logger.warning("SKIP %s: %s", pdf.name, e)
+            skipped += 1
+
+    # metadata のコピー
+    logger.info("--- metadata のコピー: metadata-ready/ → export/metadata/ ---")
+    for meta in metadata:
+        try:
+            _copy_file(meta, EXPORT_META_DIR, dry_run, logger)
+            copied_meta += 1
+        except Exception as e:
+            logger.warning("SKIP %s: %s", meta.name, e)
+            skipped += 1
+
+    # サマリ
+    logger.info("=== 完了 === PDF:%d  metadata:%d  skipped:%d", copied_pdfs, copied_meta, skipped)
+    if not dry_run:
+        logger.info("export/files/    に %d 件コピー済み", copied_pdfs)
+        logger.info("export/metadata/ に %d 件コピー済み", copied_meta)
+        logger.info("次のステップ: export/ の内容を確認し、月次で Dropbox へ手動転送してください")
+    print(f"\n  ログ保存: {log_path.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="export/ の内容を Dropbox へ移動する")
-    parser.add_argument("--dry-run", action="store_true", help="ファイルを実際に移動しない")
+    parser = argparse.ArgumentParser(
+        description="processing/renamed/ と metadata-ready/ のファイルを export/ へコピーする",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  python scripts/export_to_dropbox.py --local           # export/ へコピー
+  python scripts/export_to_dropbox.py --local --dry-run # 確認のみ（コピーしない）
+        """,
+    )
+    parser.add_argument(
+        "--local", action="store_true", required=True,
+        help="export/ へローカルコピーする（Dropbox 転送は将来実装）",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="ファイルを変更せずに確認のみ実行",
+    )
     args = parser.parse_args()
-    run(dry_run=args.dry_run)
+
+    if args.local:
+        run_local(dry_run=args.dry_run)

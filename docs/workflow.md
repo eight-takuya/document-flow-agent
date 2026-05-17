@@ -111,9 +111,11 @@ PDF / 画像ファイル
         | 人間による最終確認（docs/export-rules.md の条件を満たしたか確認）
         ↓
 [Export Buffer]
-  export/ または archive/ へ手動移動
-  - export/  : Dropbox 送出予定
-  - archive/ : ローカル保管のみ
+  python scripts/check_export_ready.py  ← export 可能か確認
+  python scripts/export_to_dropbox.py --local  ← export/files/ と export/metadata/ へコピー
+  - export/files/    : renamed/ PDF のコピー
+  - export/metadata/ : metadata-ready/ JSON のコピー
+  ※ 元ファイル（renamed/, metadata-ready/）は削除しない
         |
         | 月次・手動
         | python scripts/export_to_dropbox.py (将来実装)
@@ -179,11 +181,18 @@ PDF / 画像ファイル
 [ ] 8.  processing/metadata-ready/ の .metadata.json を開いて不足項目を補完
         → category, counterparty, discard_date など
 
-[ ] 9.  docs/export-rules.md の export 可能条件をすべて確認
+[ ] 9.  python scripts/check_export_ready.py
+        → Export ready: YES になることを確認
+        → [NG] があれば解決してから先に進む
 
-[ ] 10. 条件を満たしたファイルを export/ または archive/ へ移動
+[ ] 10. python scripts/export_to_dropbox.py --local --dry-run
+        → コピー対象ファイルを確認（ファイル変更なし）
 
-[ ] 11. export/ の内容を Dropbox の 99_Imported/ へ月次手動転送
+[ ] 11. python scripts/export_to_dropbox.py --local
+        → export/files/ と export/metadata/ へコピー
+        → ログ: logs/export-YYYYMMDD-HHMMSS.log
+
+[ ] 12. export/ の内容を Dropbox の 99_Imported/ へ月次手動転送
 
 [ ] 12. 重要ファイルを Notion に登録
 ```
