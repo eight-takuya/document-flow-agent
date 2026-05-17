@@ -1,0 +1,16 @@
+.DS_Store
+
+logs/*
+!logs/.gitkeep
+
+inbox/*
+!inbox/.gitkeep
+
+processing/*
+!processing/.gitkeep
+
+archive/*
+!archive/.gitkeep
+
+export/*
+!export/.gitkeep
