@@ -89,9 +89,27 @@ python scripts/process_inbox.py --no-ocr # OCR なしで高速実行
 
 dry-run の結果を確認する。
 
-- `ocr-error/` レポートのファイルは PDF を開いて文字化けを修正
-- `review-required/` レポートのファイルは内容を確認して Category を決定
-- 廃棄対象は inbox から削除
+#### 4a — OCR エラー対応
+
+`processing/ocr-error/` レポートを確認し、該当 PDF を開いて文字化けを手動修正する。
+
+#### 4b — review-required 対応（HTML レポートで判断入力）
+
+1. `processing/review-required/` にある `review-report-*.html` をブラウザで開く
+2. 各ファイルのカードに表示された OCR rename 候補と警告を確認する
+3. 各カードのラジオボタンで判断を選ぶ:
+   - **OK** — OCR 候補のまま rename する
+   - **修正** — ファイル名を編集して rename する
+   - **廃棄** — このファイルは保管不要
+4. 「保存用JSONを生成」ボタンを押して JSON を生成する
+5. 生成された JSON を `processing/review-required/review-decisions.json` に保存する
+6. 以下を実行して rename / metadata 生成を適用する:
+
+```bash
+python scripts/apply_review_decisions.py
+```
+
+7. 廃棄判断したファイルは inbox から手動削除してログに記録する
 
 ### Step 5 — apply（safe copy + metadata 自動生成）
 
@@ -191,6 +209,7 @@ Category 一覧は [`docs/categories.md`](docs/categories.md)、支払手段は 
 | `process_inbox.py` | 分析・rename 候補・レポート生成 | normalize の次 |
 | `rename_documents.py` | 命名規約のファイル名生成・検証 | rename 時に参照 |
 | `generate_metadata.py` | metadata scaffold 生成 | renamed/ 配置後 |
+| `apply_review_decisions.py` | review-decisions.json を処理して rename/discard/skip を実行 | review HTML 確認後 |
 | `export_to_dropbox.py` | export/ → Dropbox 転送 | 月次・手動 |
 | `scan_inbox_watcher.py` | inbox 監視（将来実装） | 常駐 |
 

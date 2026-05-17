@@ -351,9 +351,10 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
         ocr_snippet = ocr_text[:600]
 
         status_cls = "ocr-error" if item.get("needs_ocr_review") else "review"
+        card_id = f"card-{len(cards)}"
 
         cards.append(f"""
-  <div class="card {status_cls}">
+  <div class="card {status_cls}" id="{card_id}" data-source-name="{name}" data-rename-candidate="{rename}">
     <div class="card-header">
       <span class="badge {'badge-ocr' if item.get('needs_ocr_review') else 'badge-review'}">
         {'OCR ERROR' if item.get('needs_ocr_review') else 'REVIEW'}
@@ -379,14 +380,26 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
     </details>
 
     <div class="section">
-      <div class="label">人間確認メモ</div>
+      <div class="label">判断</div>
       <div class="memo-area">
-        <label><input type="checkbox"> OK — このまま rename する</label><br>
-        <label><input type="checkbox"> 修正 — ファイル名を変更する</label><br>
-        <label><input type="checkbox"> 廃棄 — このファイルは保管不要</label><br>
-        <div class="memo-input">
-          修正後ファイル名: <input type="text" placeholder="{rename}" style="width:100%">
-          備考: <input type="text" placeholder="メモを入力" style="width:100%">
+        <div class="radio-group">
+          <label class="radio-label">
+            <input type="radio" name="decision-{card_id}" value="rename-ok" onchange="onDecisionChange('{card_id}')"> OK — OCR 候補のまま rename する
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="decision-{card_id}" value="rename-custom" onchange="onDecisionChange('{card_id}')"> 修正 — ファイル名を変更して rename する
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="decision-{card_id}" value="discard" onchange="onDecisionChange('{card_id}')"> 廃棄 — このファイルは保管不要
+          </label>
+        </div>
+        <div class="memo-input" id="custom-{card_id}" style="display:none;">
+          <label style="font-size:12px;">修正後ファイル名:</label>
+          <input type="text" id="approved-{card_id}" placeholder="{rename}" value="{rename}" style="width:100%">
+        </div>
+        <div class="memo-input" style="margin-top:6px;">
+          <label style="font-size:12px;">備考:</label>
+          <input type="text" id="notes-{card_id}" placeholder="メモを入力" style="width:100%">
         </div>
       </div>
     </div>
@@ -436,10 +449,20 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
   .ocr-details summary {{ cursor: pointer; color: #0071e3; font-size: 12px; }}
   .ocr-text {{ font-size: 12px; background: #f9f9f9; padding: 10px; border-radius: 4px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; margin-top: 8px; }}
   .memo-area {{ background: #fafff4; border: 1px solid #d4edda; border-radius: 6px; padding: 10px 14px; }}
-  .memo-area label {{ display: block; margin: 4px 0; }}
-  .memo-input {{ margin-top: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }}
+  .radio-group {{ display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }}
+  .radio-label {{ display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }}
+  .radio-label input[type=radio] {{ margin: 0; cursor: pointer; }}
+  .memo-input {{ display: flex; flex-direction: column; gap: 4px; font-size: 12px; }}
   input[type=text] {{ border: 1px solid #ccc; border-radius: 4px; padding: 4px 8px; font-size: 12px; }}
   code {{ background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 12px; }}
+  .action-panel {{ position: sticky; bottom: 0; background: #fff; border-top: 2px solid #0071e3; padding: 16px 24px; display: flex; gap: 12px; align-items: flex-start; box-shadow: 0 -2px 8px rgba(0,0,0,.10); }}
+  .action-panel textarea {{ flex: 1; height: 120px; font-family: monospace; font-size: 12px; border: 1px solid #ccc; border-radius: 6px; padding: 8px; resize: vertical; }}
+  .btn {{ padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; }}
+  .btn-primary {{ background: #0071e3; color: #fff; }}
+  .btn-primary:hover {{ background: #005bb5; }}
+  .btn-secondary {{ background: #e0e0e0; color: #333; }}
+  .btn-secondary:hover {{ background: #c8c8c8; }}
+  .btn-col {{ display: flex; flex-direction: column; gap: 8px; }}
 </style>
 </head>
 <body>
@@ -462,10 +485,94 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
 {"".join(cards)}
 </div>
 
+<div class="action-panel">
+  <textarea id="json-output" readonly placeholder="「保存用JSONを生成」ボタンを押すと、判断内容がここに表示されます。&#10;生成されたJSONを scripts/apply_review_decisions.py で処理できます。"></textarea>
+  <div class="btn-col">
+    <button class="btn btn-primary" onclick="generateJSON()">保存用JSONを生成</button>
+    <button class="btn btn-secondary" onclick="copyJSON()">コピー</button>
+  </div>
+</div>
+
 <script>
-  // ページ印刷時にすべての details を展開する
   window.onbeforeprint = () => document.querySelectorAll('details').forEach(d => d.open = true);
   window.onafterprint = () => document.querySelectorAll('details').forEach(d => d.open = false);
+
+  function onDecisionChange(cardId) {{
+    var radios = document.querySelectorAll('input[name="decision-' + cardId + '"]');
+    var selected = '';
+    radios.forEach(function(r) {{ if (r.checked) selected = r.value; }});
+    var customDiv = document.getElementById('custom-' + cardId);
+    if (selected === 'rename-custom') {{
+      customDiv.style.display = 'flex';
+    }} else {{
+      customDiv.style.display = 'none';
+    }}
+  }}
+
+  function generateJSON() {{
+    var now = new Date();
+    var pad = function(n) {{ return n.toString().padStart(2, '0'); }};
+    var reviewedAt = now.getFullYear() + '-' + pad(now.getMonth()+1) + '-' + pad(now.getDate()) +
+      ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+
+    var cards = document.querySelectorAll('.card[data-source-name]');
+    var items = [];
+    cards.forEach(function(card) {{
+      var cardId = card.id;
+      var sourceName = card.dataset.sourceName;
+      var renameCandidateAttr = card.dataset.renameCandidate || '';
+
+      var radios = document.querySelectorAll('input[name="decision-' + cardId + '"]');
+      var selected = '';
+      radios.forEach(function(r) {{ if (r.checked) selected = r.value; }});
+
+      var decision, approvedFileName;
+      if (selected === 'rename-ok') {{
+        decision = 'rename';
+        approvedFileName = renameCandidateAttr;
+      }} else if (selected === 'rename-custom') {{
+        decision = 'rename';
+        var inp = document.getElementById('approved-' + cardId);
+        approvedFileName = inp ? inp.value.trim() : renameCandidateAttr;
+      }} else if (selected === 'discard') {{
+        decision = 'discard';
+        approvedFileName = '';
+      }} else {{
+        decision = 'skip';
+        approvedFileName = '';
+      }}
+
+      var notesInp = document.getElementById('notes-' + cardId);
+      var notes = notesInp ? notesInp.value.trim() : '';
+
+      items.push({{
+        source_file_name: sourceName,
+        decision: decision,
+        approved_file_name: approvedFileName,
+        notes: notes
+      }});
+    }});
+
+    var output = {{ reviewed_at: reviewedAt, items: items }};
+    document.getElementById('json-output').value = JSON.stringify(output, null, 2);
+  }}
+
+  function copyJSON() {{
+    var ta = document.getElementById('json-output');
+    if (!ta.value) {{ generateJSON(); }}
+    ta.select();
+    try {{
+      navigator.clipboard.writeText(ta.value).catch(function() {{
+        document.execCommand('copy');
+      }});
+    }} catch(e) {{
+      document.execCommand('copy');
+    }}
+    var btn = event.target;
+    var orig = btn.textContent;
+    btn.textContent = 'コピーしました';
+    setTimeout(function() {{ btn.textContent = orig; }}, 1500);
+  }}
 </script>
 </body>
 </html>"""

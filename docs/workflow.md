@@ -69,9 +69,12 @@ PDF / 画像ファイル
         ↓
 [Review]  ← 人間 / Claude Cowork による確認
   - ocr-error: PDF を開いて文字化けを修正
-  - review-required: 内容確認・Category 決定
-  - 廃棄対象: inbox から削除してログに記録
-  - 問題なければ --apply を実行してよいと判断する
+  - review-required: HTML レポートをブラウザで開く
+      1. 各カードのラジオボタンで OK / 修正 / 廃棄 を選択
+      2. 「保存用JSONを生成」ボタン押下
+      3. 生成 JSON を processing/review-required/review-decisions.json に保存
+      4. python scripts/apply_review_decisions.py を実行
+  - 廃棄対象: inbox から手動削除してログに記録
         |
         ↓
 [Apply]  ← 人間確認後のみ実行
@@ -149,8 +152,11 @@ PDF / 画像ファイル
 [ ] 3.  processing/ocr-error/ のレポートを確認
         → 該当 PDF を開いて文字化けを修正 → 手動で renamed/ へコピー
 
-[ ] 4.  processing/review-required/ のレポートを確認
-        → 内容確認・Category を決定 → 修正後に renamed/ へ手動コピー
+[ ] 4.  processing/review-required/ の HTML レポートをブラウザで開く
+        → 各カードで OK / 修正 / 廃棄 を選択
+        → 「保存用JSONを生成」ボタン押下
+        → 生成 JSON を processing/review-required/review-decisions.json に保存
+        → python scripts/apply_review_decisions.py を実行
 
 [ ] 5.  廃棄対象を inbox から削除（ログに「廃棄」として記録）
 
