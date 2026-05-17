@@ -120,6 +120,15 @@ PDF / 画像ファイル
         | 月次・手動
         | python scripts/export_to_dropbox.py (将来実装)
         ↓
+[Archive original input]  ← export 完了後
+  python scripts/archive_input.py --dry-run  ← 移動先を確認
+  python scripts/archive_input.py --apply    ← inbox/ → archive/original-input/YYYYMM/ へ移動
+  - ファイル名先頭の日付から月フォルダを決定
+  - 日付なし → ファイルの更新日時を使用
+  - 同名ファイルは -001, -002 ... で連番付与（上書きなし）
+  - 処理済みファイル未検出時は安全チェックで停止（--force で強制）
+        |
+        ↓
 [Dropbox]
   00_DocumentVault/99_Imported/ へ転送
   月次レビューで各フォルダへ振り分け
@@ -145,6 +154,7 @@ PDF / 画像ファイル
 | Rename 補完 | **Human / Claude Cowork** | renamed/ のファイル名に Category を手動追加 |
 | Metadata 補完 | **Claude Cowork** | `.metadata.json` を開いて category 等を補完 |
 | Export Buffer | **Human** | export-rules を確認して export/ または archive/ へ移動 |
+| Archive Input | **Claude Cowork** | `archive_input.py --apply` で inbox 原本を月別アーカイブ |
 | Dropbox | **Human** | 月次で export/ → Dropbox へ手動転送 |
 | Notion | **Human** | 重要ファイルのみ登録 |
 | 開発・保守 | **Claude Code** | スクリプト改修・構造変更 |
@@ -194,7 +204,14 @@ PDF / 画像ファイル
 
 [ ] 12. export/ の内容を Dropbox の 99_Imported/ へ月次手動転送
 
-[ ] 12. 重要ファイルを Notion に登録
+[ ] 13. python scripts/archive_input.py --dry-run
+        → 移動先（archive/original-input/YYYYMM/）を確認
+
+[ ] 14. python scripts/archive_input.py --apply
+        → inbox/ の処理済み原本を月別フォルダへ移動
+        → inbox が空になることを確認
+
+[ ] 15. 重要ファイルを Notion に登録
 ```
 
 ---
@@ -203,7 +220,8 @@ PDF / 画像ファイル
 
 | フォルダ | 月次処理後の理想状態 |
 |---|---|
-| `inbox/` | 処理済みファイルのみ残る（次のスキャン分が来るまで保持） |
+| `inbox/` | `archive_input.py --apply` 実行後は空（次のスキャン分が来るまで） |
+| `archive/original-input/YYYYMM/` | 月別アーカイブ済み原本（累積） |
 | `processing/review-required/` | レポート JSON のみ（PDF は移動しない） |
 | `processing/renamed/` | 処理中 PDF のみ（metadata 生成後は metadata-ready へ） |
 | `processing/metadata-ready/` | PDF + .metadata.json のペア |

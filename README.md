@@ -264,14 +264,34 @@ Category 一覧は [`docs/categories.md`](docs/categories.md)、支払手段は 
 | `apply_review_decisions.py` | review-decisions.json を処理して rename/discard/skip を実行 | review HTML 確認後 |
 | `check_export_ready.py` | export 可能か判定（review 残・renamed 有無・metadata 対応） | export 前 |
 | `export_to_dropbox.py` | renamed/ と metadata-ready/ を export/ へコピー（--local） | check 後 |
+| `archive_input.py` | inbox 原本を archive/original-input/YYYYMM/ へ月別アーカイブ | export 後 |
 | `scan_inbox_watcher.py` | inbox 監視（将来実装） | 常駐 |
+
+---
+
+## inbox 原本アーカイブ
+
+処理完了後、inbox 原本を月別フォルダへ退避する。
+
+```bash
+python3 scripts/archive_input.py --dry-run   # 移動先確認（ファイルは変更しない）
+python3 scripts/archive_input.py --apply     # 実際に移動（export 後に実行）
+```
+
+アーカイブ先: `archive/original-input/YYYYMM/`
+
+- ファイル名先頭の日付（YYYYMMDD）から月フォルダを決定
+- 日付が取れない場合はファイルの更新日時を使用
+- 同名ファイルがある場合は `-001`, `-002` を付与（上書き禁止）
+- `export/files/` または `processing/renamed/` または `processing/auto-approved/` に処理済みファイルがない場合は安全チェックで停止
+- 強制実行: `--force` オプション
 
 ---
 
 ## 運用ルール（Claude Cowork 向け）
 
 - 月次処理は `docs/workflow.md` のチェックリストに沿って進める
-- **inbox のファイルは絶対に削除・移動しない**（コピーのみ）
+- **inbox の原本は export 完了後に `archive_input.py --apply` で退避する**（export 前は削除不可）
 - 分類・リネームは `docs/naming-convention.md` と `docs/categories.md` を参照する
 - export は `docs/export-rules.md` の条件を満たしたもののみ
 - `logs/` には処理日時・ファイル名・アクションを記録する
