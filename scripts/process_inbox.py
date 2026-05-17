@@ -33,6 +33,7 @@ REPO_ROOT = Path(__file__).parent.parent
 INBOX_DIR = REPO_ROOT / "inbox"
 PROCESSING_DIR = REPO_ROOT / "processing"
 RENAMED_DIR = PROCESSING_DIR / "renamed"
+AUTO_APPROVED_DIR = PROCESSING_DIR / "auto-approved"
 METADATA_READY_DIR = PROCESSING_DIR / "metadata-ready"
 REVIEW_DIR = PROCESSING_DIR / "review-required"
 OCR_ERROR_DIR = PROCESSING_DIR / "ocr-error"
@@ -48,11 +49,15 @@ from normalize_documents import (
 )
 from generate_metadata import generate_metadata, save_metadata
 from ocr_extract import (
-    extract_text,
     parse_rename_fields,
     build_ocr_rename_candidate,
     ensure_ocr_binary,
+    load_patterns,
+    apply_patterns,
+    compute_confidence,
+    is_auto_approvable,
 )
+from ocr_utils import extract_text_with_engine
 
 MAX_STEM_LENGTH = 80
 DATE_PREFIX_PATTERN = re.compile(r"^\d{8}[_\-\s]?")
@@ -96,8 +101,8 @@ def _build_best_effort_name(name: str) -> str:
     return "-".join(parts) + ".pdf"
 
 
-def analyze_file(path: Path, use_ocr: bool) -> Dict:
-    """ファイルを分析してフラグ・OCR結果・rename 候補を返す。"""
+def analyze_file(path: Path, use_ocr: bool, patterns: Optional[list] = None) -> Dict:
+    """ファイルを分析してフラグ・OCR結果・rename 候補・confidenceを返す。"""
     name = path.name
     kind = classify_file(path)
     date = extract_date(name)
@@ -125,12 +130,34 @@ def analyze_file(path: Path, use_ocr: bool) -> Dict:
     ocr_text = ""
     ocr_fields: Dict = {}
     ocr_rename_candidate = ""
+    ocr_engine = "none"
+    confidence = 0.0
+    confidence_reasons: List[str] = []
+    pattern_matched = False
+    auto_approved = False
 
     if use_ocr and kind in ("PDF", "IMAGE"):
-        ocr_text = extract_text(path)
+        result = extract_text_with_engine(path)
+        ocr_text = result.text
+        ocr_engine = result.engine
         if ocr_text:
             ocr_fields = parse_rename_fields(ocr_text, name, tags)
+            # pattern matching
+            if patterns:
+                ocr_fields, pattern_reasons = apply_patterns(ocr_text, name, ocr_fields, patterns)
+                pattern_matched = bool(pattern_reasons)
+                confidence_reasons.extend(pattern_reasons)
             ocr_rename_candidate = build_ocr_rename_candidate(ocr_fields)
+            # confidence scoring
+            score, score_reasons = compute_confidence(
+                ocr_fields, garbled, date_only, ocr_rename_candidate, pattern_matched
+            )
+            confidence = score
+            confidence_reasons = score_reasons + confidence_reasons
+            auto_approved = (
+                not needs_review
+                and is_auto_approvable(ocr_fields, garbled, date_only, ocr_rename_candidate, confidence)
+            )
 
     # --- filename-based rename hint ---
     if date:
@@ -161,6 +188,11 @@ def analyze_file(path: Path, use_ocr: bool) -> Dict:
         "ocr_text": ocr_text,
         "ocr_fields": ocr_fields,
         "ocr_rename_candidate": ocr_rename_candidate,
+        "ocr_engine": ocr_engine,
+        "confidence": confidence,
+        "confidence_reasons": confidence_reasons,
+        "pattern_matched": pattern_matched,
+        "auto_approved": auto_approved,
         "warnings": warnings,
     }
 
@@ -190,6 +222,13 @@ def copy_to_renamed(src: Path, dest_name: str) -> Path:
     return dest
 
 
+def copy_to_auto_approved(src: Path, dest_name: str) -> Path:
+    AUTO_APPROVED_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _resolve_dest(AUTO_APPROVED_DIR, dest_name)
+    shutil.copy2(src, dest)
+    return dest
+
+
 # ---------------------------------------------------------------------------
 # Report: JSON
 # ---------------------------------------------------------------------------
@@ -205,6 +244,10 @@ def _write_json_report(items: List[Dict], path: Path) -> None:
                 "rename_hint": item["rename_hint"],
                 "ocr_rename_candidate": item.get("ocr_rename_candidate", ""),
                 "ocr_fields": item.get("ocr_fields", {}),
+                "ocr_engine": item.get("ocr_engine", "none"),
+                "confidence": item.get("confidence", 0.0),
+                "confidence_reasons": item.get("confidence_reasons", []),
+                "auto_approved": item.get("auto_approved", False),
             }
             for item in items
         ],
@@ -375,6 +418,22 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
         status_cls = "ocr-error" if item.get("needs_ocr_review") else "review"
         card_id = f"card-{len(cards)}"
 
+        # Confidence badge
+        conf = item.get("confidence", 0.0)
+        if conf >= 0.85:
+            conf_cls = "badge-conf-high"
+            conf_label = f"confidence: {conf:.0%} ✓"
+        elif conf >= 0.5:
+            conf_cls = "badge-conf-mid"
+            conf_label = f"confidence: {conf:.0%}"
+        elif conf > 0.0:
+            conf_cls = "badge-conf-low"
+            conf_label = f"confidence: {conf:.0%} ⚠"
+        else:
+            conf_cls = "badge-conf-none"
+            conf_label = "confidence: —"
+        ocr_engine_label = esc(item.get("ocr_engine", "none"))
+
         cards.append(f"""
   <div class="card {status_cls}" id="{card_id}"
        data-source-name="{name}"
@@ -384,6 +443,8 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
       <span class="badge {'badge-ocr' if item.get('needs_ocr_review') else 'badge-review'}">
         {'OCR ERROR' if item.get('needs_ocr_review') else 'REVIEW'}
       </span>
+      <span class="badge {conf_cls}">{conf_label}</span>
+      <span class="badge badge-engine">engine: {ocr_engine_label}</span>
       <span class="filename">{name}</span>
     </div>
 
@@ -467,6 +528,11 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
   .badge {{ padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }}
   .badge-review {{ background: #fff3cd; color: #856404; }}
   .badge-ocr {{ background: #f8d7da; color: #842029; }}
+  .badge-conf-high {{ background: #d4edda; color: #155724; }}
+  .badge-conf-mid {{ background: #fff3cd; color: #856404; }}
+  .badge-conf-low {{ background: #f8d7da; color: #721c24; }}
+  .badge-conf-none {{ background: #e9ecef; color: #6c757d; }}
+  .badge-engine {{ background: #e8f0fe; color: #1a56db; font-weight: 400; }}
   .section {{ padding: 10px 16px; border-bottom: 1px solid #f5f5f5; }}
   .section:last-child {{ border-bottom: none; }}
   .label {{ font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }}
@@ -813,11 +879,13 @@ def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
         print("  swiftc scripts/vision_ocr.swift -o scripts/vision_ocr を手動実行してください。")
         use_ocr = False
 
+    patterns = load_patterns()
+
     classified = scan_inbox(INBOX_DIR)
     all_files = classified["PDF"] + classified["IMAGE"] + classified["UNSUPPORTED"]
 
     _sep()
-    print(f"[SCAN]  mode={mode}  ocr={'on' if use_ocr else 'off'}")
+    print(f"[SCAN]  mode={mode}  ocr={'on' if use_ocr else 'off'}  patterns={len(patterns)}")
     _sep()
     print(f"Found {len(all_files)} files in inbox/")
     if use_ocr:
@@ -828,19 +896,55 @@ def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
     for f in all_files:
         sys.stdout.write(f"  Analyzing: {f.name[:50]!s:<52}\r")
         sys.stdout.flush()
-        analyses.append(analyze_file(f, use_ocr))
+        analyses.append(analyze_file(f, use_ocr, patterns))
     sys.stdout.write(" " * 60 + "\r")
 
-    normal = [a for a in analyses if not a["needs_review"]]
+    all_normal = [a for a in analyses if not a["needs_review"]]
+    auto_approved_items = [a for a in all_normal if a.get("auto_approved")]
+    normal = [a for a in all_normal if not a.get("auto_approved")]
     review_needed = [a for a in analyses if a["needs_review"] and not a["needs_ocr_review"]]
     ocr_errors = [a for a in analyses if a["needs_ocr_review"]]
 
     log_details: List[Dict] = []
     copied_count = 0
+    auto_copied_count = 0
     metadata_count = 0
 
     # -----------------------------------------------------------------------
-    # Normal files — SUGGEST or APPLY
+    # Auto-approved files — copy to auto-approved/ (no human review needed)
+    # -----------------------------------------------------------------------
+    if auto_approved_items:
+        label_aa = "[AUTO-APPROVED] — confidence≥85% → auto-approved/" if apply else "[AUTO-APPROVED] — 高信頼度ファイル（dry-run: 変更なし）"
+        print(label_aa)
+        _sep("-")
+        for item in auto_approved_items:
+            rename = item["display_rename"]
+            conf_pct = f"{item['confidence']:.0%}"
+            engine = item.get("ocr_engine", "none")
+            if apply:
+                dest_path = copy_to_auto_approved(item["path"], rename)
+                dest_rel = dest_path.relative_to(REPO_ROOT)
+                metadata = generate_metadata(dest_path.name, source_filename=item["name"])
+                metadata["status"] = "auto-approved"
+                metadata["confidence"] = item["confidence"]
+                meta_path = save_metadata(metadata, METADATA_READY_DIR)
+                meta_rel = meta_path.relative_to(REPO_ROOT)
+                auto_copied_count += 1
+                metadata_count += 1
+                print(f"  [AUTO]  {item['name']}  (conf:{conf_pct} engine:{engine})")
+                print(f"          → {dest_rel}")
+                print(f"  [META]  → {meta_rel}")
+                log_details.append({"status": "AUTO-APPROVED", "src": item["name"], "dest": str(dest_rel),
+                                     "ocr_ok": True, "confidence": item["confidence"]})
+            else:
+                print(f"  {item['name']}  (conf:{conf_pct} engine:{engine})")
+                print(f"  → {rename}  [auto-approved]")
+                log_details.append({"status": "AUTO-DRY", "src": item["name"], "dest": rename,
+                                     "ocr_ok": True, "confidence": item["confidence"]})
+        print()
+
+    # -----------------------------------------------------------------------
+    # Normal files — SUGGEST or APPLY (renamed/)
     # -----------------------------------------------------------------------
     label = "[APPLY] — safe copy to renamed/" if apply else "[SUGGEST] — rename 候補（dry-run: 変更なし）"
     print(label)
@@ -921,7 +1025,9 @@ def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
     _sep()
     print(f"  mode           : {mode}")
     print(f"  ocr            : {'enabled' if use_ocr else 'disabled'}")
+    print(f"  patterns loaded: {len(patterns)}")
     print(f"  total          : {len(analyses)}")
+    print(f"  auto-approved  : {len(auto_approved_items)}  {'(dry-run: 0)' if not apply else f'(copied: {auto_copied_count})'}")
     print(f"  rename 候補    : {len(normal)}")
     print(f"  copy 実行      : {copied_count}  {'(dry-run: 0)' if not apply else ''}")
     print(f"  metadata 生成  : {metadata_count}  {'(dry-run: 0)' if not apply else ''}")

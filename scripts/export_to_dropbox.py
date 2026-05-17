@@ -30,6 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 RENAMED_DIR = ROOT / "processing" / "renamed"
+AUTO_APPROVED_DIR = ROOT / "processing" / "auto-approved"
 METADATA_DIR = ROOT / "processing" / "metadata-ready"
 REVIEW_DIR = ROOT / "processing" / "review-required"
 DECISIONS_FILE = REVIEW_DIR / "review-decisions.json"
@@ -73,10 +74,12 @@ def _safe_copy_dest(dest_dir: Path, filename: str) -> Path:
 
 
 def _collect_pdfs() -> list:
-    """renamed/ の PDF 一覧（.gitkeep 除外）。"""
-    if not RENAMED_DIR.exists():
-        return []
-    return sorted(f for f in RENAMED_DIR.glob("*.pdf") if f.name != ".gitkeep")
+    """renamed/ と auto-approved/ の PDF 一覧（.gitkeep 除外）。"""
+    pdfs = []
+    for d in (RENAMED_DIR, AUTO_APPROVED_DIR):
+        if d.exists():
+            pdfs.extend(f for f in d.glob("*.pdf") if f.name != ".gitkeep")
+    return sorted(pdfs)
 
 
 def _collect_metadata() -> list:

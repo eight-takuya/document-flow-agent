@@ -21,6 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 RENAMED_DIR = ROOT / "processing" / "renamed"
+AUTO_APPROVED_DIR = ROOT / "processing" / "auto-approved"
 METADATA_DIR = ROOT / "processing" / "metadata-ready"
 REVIEW_DIR = ROOT / "processing" / "review-required"
 APPLIED_DIR = REVIEW_DIR / "applied"
@@ -71,9 +72,11 @@ def _pending_review_files() -> list:
 
 
 def _renamed_pdfs() -> list:
-    if not RENAMED_DIR.exists():
-        return []
-    return [f for f in RENAMED_DIR.glob("*.pdf") if f.name != ".gitkeep"]
+    pdfs = []
+    for d in (RENAMED_DIR, AUTO_APPROVED_DIR):
+        if d.exists():
+            pdfs.extend(f for f in d.glob("*.pdf") if f.name != ".gitkeep")
+    return pdfs
 
 
 def _metadata_jsons() -> list:
@@ -116,12 +119,12 @@ def run() -> bool:
             + ", ".join(pending)
         )
 
-    # 3. renamed/ に PDF があるか
+    # 3. renamed/ または auto-approved/ に PDF があるか
     renamed_pdfs = _renamed_pdfs()
     if not renamed_pdfs:
-        issues.append("processing/renamed/ に PDF がありません")
+        issues.append("processing/renamed/ および processing/auto-approved/ に PDF がありません")
     else:
-        infos.append(f"renamed files found: {len(renamed_pdfs)}")
+        infos.append(f"renamed/auto-approved files found: {len(renamed_pdfs)}")
 
     # 4. metadata-ready/ に metadata があるか
     metadata_jsons = _metadata_jsons()

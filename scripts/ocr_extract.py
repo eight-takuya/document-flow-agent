@@ -8,11 +8,12 @@ OCR テキストからの rename フィールド推定モジュール。
 外部 pip パッケージは不要。
 """
 
+import json
 import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 SCRIPTS_DIR = Path(__file__).parent
 SWIFT_SOURCE = SCRIPTS_DIR / "vision_ocr.swift"
@@ -303,3 +304,177 @@ def build_ocr_rename_candidate(fields: Dict) -> str:
         parts.append(payment)
 
     return "-".join(parts) + ".pdf"
+
+
+# ---------------------------------------------------------------------------
+# Pattern matching
+# ---------------------------------------------------------------------------
+
+def load_patterns(patterns_path: Optional[Path] = None) -> list:
+    """config/patterns.json を読み込んでパターンリストを返す。"""
+    if patterns_path is None:
+        patterns_path = Path(__file__).parent.parent / "config" / "patterns.json"
+    if not patterns_path.exists():
+        return []
+    try:
+        import json as _json
+        with open(patterns_path, encoding="utf-8") as f:
+            config = _json.load(f)
+        return config.get("patterns", [])
+    except Exception:
+        return []
+
+
+def apply_patterns(
+    text: str,
+    filename: str,
+    fields: Dict,
+    patterns: Optional[list] = None,
+) -> tuple:
+    """
+    パターンを適用して fields を更新する。
+
+    Returns: (updated_fields: Dict, matched_reasons: List[str])
+    """
+    if patterns is None:
+        patterns = load_patterns()
+
+    combined = text + " " + filename
+    matched_reasons: List[str] = []
+    updated = dict(fields)
+
+    for pattern in patterns:
+        keywords = pattern.get("keywords", [])
+        for keyword in keywords:
+            if keyword in combined:
+                pat_category = pattern.get("category", "")
+                pat_document = pattern.get("document", "")
+                pat_counterparty = pattern.get("counterparty", "")
+
+                changed = False
+                if pat_category and (not updated.get("category") or updated.get("category") == "Other"):
+                    updated["category"] = pat_category
+                    changed = True
+                if pat_document and not updated.get("document"):
+                    updated["document"] = pat_document
+                    changed = True
+                if pat_counterparty and not updated.get("counterparty"):
+                    updated["counterparty"] = pat_counterparty
+                    changed = True
+
+                if changed or (pat_category and updated.get("category") == pat_category):
+                    matched_reasons.append(f"pattern: {keyword} → {pat_category}/{pat_document}")
+                break  # 1パターン1マッチのみ
+
+    return updated, matched_reasons
+
+
+# ---------------------------------------------------------------------------
+# Confidence scoring
+# ---------------------------------------------------------------------------
+
+AUTO_APPROVE_THRESHOLD = 0.85
+
+CONFIDENCE_WEIGHTS = {
+    "date":           0.20,
+    "category":       0.20,
+    "document":       0.25,
+    "counterparty":   0.15,
+    "amount_jpy":     0.10,
+    "payment_method": 0.10,
+}
+PENALTY_GARBLED    = -0.30
+PENALTY_DATE_ONLY  = -0.20
+PENALTY_PLACEHOLDER = -0.30
+BONUS_PATTERN_MATCH = 0.05
+
+
+def compute_confidence(
+    fields: Dict,
+    garbled: bool,
+    date_only: bool,
+    ocr_rename_candidate: str,
+    pattern_matched: bool = False,
+) -> tuple:
+    """
+    OCR 推定結果の confidence スコアを計算する。
+
+    Returns: (score: float, reasons: List[str])
+    """
+    score = 0.0
+    reasons: List[str] = []
+
+    if fields.get("date"):
+        score += CONFIDENCE_WEIGHTS["date"]
+        reasons.append(f"date detected: {fields['date']} (+{CONFIDENCE_WEIGHTS['date']})")
+
+    category = fields.get("category", "Other")
+    if category and category != "Other":
+        score += CONFIDENCE_WEIGHTS["category"]
+        reasons.append(f"category detected: {category} (+{CONFIDENCE_WEIGHTS['category']})")
+
+    if fields.get("document"):
+        score += CONFIDENCE_WEIGHTS["document"]
+        reasons.append(f"document detected: {fields['document']} (+{CONFIDENCE_WEIGHTS['document']})")
+
+    if fields.get("counterparty"):
+        score += CONFIDENCE_WEIGHTS["counterparty"]
+        reasons.append(f"counterparty detected: {fields['counterparty']} (+{CONFIDENCE_WEIGHTS['counterparty']})")
+
+    if fields.get("amount_jpy") is not None:
+        score += CONFIDENCE_WEIGHTS["amount_jpy"]
+        reasons.append(f"amount detected: {fields['amount_jpy']} (+{CONFIDENCE_WEIGHTS['amount_jpy']})")
+
+    if fields.get("payment_method"):
+        score += CONFIDENCE_WEIGHTS["payment_method"]
+        reasons.append(f"payment_method detected (+{CONFIDENCE_WEIGHTS['payment_method']})")
+
+    if garbled:
+        score += PENALTY_GARBLED
+        reasons.append(f"OCR garbled suspected ({PENALTY_GARBLED})")
+
+    if date_only:
+        score += PENALTY_DATE_ONLY
+        reasons.append(f"date-only filename ({PENALTY_DATE_ONLY})")
+
+    if "[Document要確認]" in ocr_rename_candidate or "[日付不明]" in ocr_rename_candidate:
+        score += PENALTY_PLACEHOLDER
+        reasons.append(f"placeholder in rename candidate ({PENALTY_PLACEHOLDER})")
+
+    if pattern_matched:
+        score += BONUS_PATTERN_MATCH
+        reasons.append(f"pattern match bonus (+{BONUS_PATTERN_MATCH})")
+
+    score = max(0.0, min(1.0, round(score, 2)))
+    return score, reasons
+
+
+def is_auto_approvable(
+    fields: Dict,
+    garbled: bool,
+    date_only: bool,
+    ocr_rename_candidate: str,
+    confidence: float,
+) -> bool:
+    """
+    auto-approved の条件を満たすか判定する。
+    confidence >= 0.85 かつ以下をすべて満たす:
+      - Category が推定されている（Other 以外）
+      - Document が推定されている
+      - OCR 文字化けなし
+      - 日付のみファイル名でない
+      - rename 候補にプレースホルダーなし
+    """
+    if confidence < AUTO_APPROVE_THRESHOLD:
+        return False
+    if garbled:
+        return False
+    if date_only:
+        return False
+    if not fields.get("category") or fields.get("category") == "Other":
+        return False
+    if not fields.get("document"):
+        return False
+    if "[Document要確認]" in ocr_rename_candidate or "[日付不明]" in ocr_rename_candidate:
+        return False
+    return True

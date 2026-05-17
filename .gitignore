@@ -13,6 +13,7 @@ processing/*
 !processing/.gitkeep
 !processing/review-required/
 !processing/renamed/
+!processing/auto-approved/
 !processing/metadata-ready/
 !processing/ocr-error/
 
@@ -25,6 +26,9 @@ processing/review-required/applied/*
 
 processing/renamed/*
 !processing/renamed/.gitkeep
+
+processing/auto-approved/*
+!processing/auto-approved/.gitkeep
 
 processing/metadata-ready/*
 !processing/metadata-ready/.gitkeep
