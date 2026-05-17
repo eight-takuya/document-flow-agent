@@ -1,5 +1,8 @@
 .DS_Store
 
+# Swift OCR バイナリ（コンパイル済み実行ファイル）
+scripts/vision_ocr
+
 logs/*
 !logs/.gitkeep
 

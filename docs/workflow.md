@@ -6,6 +6,45 @@ Claude Cowork が月次運用を行う際の手順書として使用してくだ
 
 ---
 
+## OCR 起点 rename の思想
+
+**ファイル名ではなく、PDFの中身を見てrename候補を作る。**
+
+- ファイル名が日付のみ（`20260517.pdf`）でも、PDF を開いて OCR し、内容から Category・Document・Counterparty を推定する
+- ファイル名が文字化けしていても、OCR テキストから正しい内容を取得できる場合がある
+- OCR 候補はあくまで **推定** であり、人間の確認が前提
+- `--apply` はOCR候補を使ってファイルをコピーするが、review-required は対象外
+
+### OCR の仕組み
+
+```
+PDF / 画像ファイル
+       |
+       | sips（macOS 標準）で1ページ目を JPEG に変換
+       ↓
+  JPEG 画像
+       |
+       | scripts/vision_ocr（macOS Vision Framework / Swift）
+       | 日本語・英語 OCR
+       ↓
+  OCR テキスト
+       |
+       | scripts/ocr_extract.py（ヒューリスティック解析）
+       | 日付・Category・Document・Counterparty・金額を推定
+       ↓
+  rename 候補
+```
+
+### レポートの使い分け
+
+| 形式 | 目的 | 用途 |
+|---|---|---|
+| `.json` | 機械処理用 | スクリプトからの読み取り |
+| `.md` | 人間確認用（テキスト） | テキストエディタ・Obsidian での確認 |
+| `.html` | 人間確認用（ビジュアル） | ブラウザで開く・印刷・チェック記入 |
+
+---
+
 ## Current Flow
 
 ```

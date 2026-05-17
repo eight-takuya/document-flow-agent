@@ -1,26 +1,29 @@
 """
 process_inbox.py
 
-inbox をスキャンし、分析・rename候補提示・safe copy を行う。
+inbox をスキャンし、OCR + ヒューリスティック分析で rename 候補を生成する。
+レビュー対象は JSON / Markdown / HTML の3形式でレポートを出力する。
 
-デフォルト動作は --dry-run（分析と表示のみ）。
---apply を明示した場合のみ、review不要ファイルを processing/renamed/ へコピーし
-metadata scaffold を自動生成する。
+デフォルト: --dry-run（ファイル変更なし）
+--apply  : review 不要ファイルを renamed/ へ safe copy + metadata 生成
+--no-ocr : OCR をスキップしてファイル名分析のみ
 
 Usage:
-    python scripts/process_inbox.py            # --dry-run と同じ
-    python scripts/process_inbox.py --dry-run  # 分析のみ（ファイルは変更しない）
-    python scripts/process_inbox.py --apply    # renamed/ へコピー + metadata 生成
+    python scripts/process_inbox.py              # dry-run + OCR
+    python scripts/process_inbox.py --dry-run    # 同上
+    python scripts/process_inbox.py --no-ocr     # dry-run, OCR なし
+    python scripts/process_inbox.py --apply      # safe copy + metadata
 """
 
 import argparse
+import html as html_module
 import json
 import re
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 REPO_ROOT = Path(__file__).parent.parent
 INBOX_DIR = REPO_ROOT / "inbox"
@@ -39,17 +42,22 @@ from normalize_documents import (
     extract_bracket_tags,
     classify_file,
 )
-from generate_metadata import generate_metadata, save_metadata, METADATA_READY_DIR as META_DIR
+from generate_metadata import generate_metadata, save_metadata
+from ocr_extract import (
+    extract_text,
+    parse_rename_fields,
+    build_ocr_rename_candidate,
+    ensure_ocr_binary,
+)
 
 MAX_STEM_LENGTH = 80
-# 日付プレフィクス + アンダースコア／スペース を除去するパターン
 DATE_PREFIX_PATTERN = re.compile(r"^\d{8}[_\-\s]?")
 BRACKET_TAG_PATTERN = re.compile(r"【[^】]+】")
 UNSAFE_CHARS_PATTERN = re.compile(r'[/\\:*?"<>|\s]')
 
 
 # ---------------------------------------------------------------------------
-# Analysis helpers
+# File analysis
 # ---------------------------------------------------------------------------
 
 def is_date_only(name: str) -> bool:
@@ -60,12 +68,7 @@ def is_too_long(name: str) -> bool:
     return len(Path(name).stem) > MAX_STEM_LENGTH
 
 
-def extract_document_portion(name: str) -> str:
-    """
-    既存ファイル名から date prefix と bracket tags を除いた "document" 部分を抽出する。
-    例: '20260226_業務完了通知書.pdf' → '業務完了通知書'
-        '20260401【B8E】適用事業所所在名称変更通知書.pdf' → '適用事業所所在名称変更通知書'
-    """
+def _extract_document_portion(name: str) -> str:
     stem = Path(name).stem
     stem = BRACKET_TAG_PATTERN.sub("", stem)
     stem = DATE_PREFIX_PATTERN.sub("", stem)
@@ -74,32 +77,23 @@ def extract_document_portion(name: str) -> str:
     return stem
 
 
-def build_best_effort_name(name: str) -> str:
-    """
-    既存ファイル名から命名規約に近いベストエフォート名を生成する。
-    Category は人間が後で補完するため含めない。
-
-    例: '20260226_業務完了通知書.pdf' → '20260226-業務完了通知書.pdf'
-        '20260401【B8E】適用事業所所在名称変更通知書.pdf' → '20260401-適用事業所所在名称変更通知書-B8E.pdf'
-    """
+def _build_best_effort_name(name: str) -> str:
+    """ファイル名ベースのベストエフォート rename 候補（Category なし）。"""
     date = extract_date(name)
     if not date:
         return name
-
     tags = extract_bracket_tags(name)
-    doc = extract_document_portion(name)
-
+    doc = _extract_document_portion(name)
     parts = [date]
     if doc:
         parts.append(doc)
     if tags:
         parts.append(tags[0])
-
     return "-".join(parts) + ".pdf"
 
 
-def analyze_file(path: Path) -> Dict:
-    """ファイルを分析してフラグと rename 情報を返す。"""
+def analyze_file(path: Path, use_ocr: bool) -> Dict:
+    """ファイルを分析してフラグ・OCR結果・rename 候補を返す。"""
     name = path.name
     kind = classify_file(path)
     date = extract_date(name)
@@ -123,16 +117,28 @@ def analyze_file(path: Path) -> Dict:
     needs_ocr_review = garbled
     needs_review = bool(warnings)
 
-    rename_hint: str
-    best_effort_name: Optional[str]
+    # --- OCR ---
+    ocr_text = ""
+    ocr_fields: Dict = {}
+    ocr_rename_candidate = ""
 
+    if use_ocr and kind in ("PDF", "IMAGE"):
+        ocr_text = extract_text(path)
+        if ocr_text:
+            ocr_fields = parse_rename_fields(ocr_text, name, tags)
+            ocr_rename_candidate = build_ocr_rename_candidate(ocr_fields)
+
+    # --- filename-based rename hint ---
     if date:
         tag_suffix = f"-{tags[0]}" if tags else ""
         rename_hint = f"{date}-[Category]-[Document]{tag_suffix}.pdf"
-        best_effort_name = build_best_effort_name(name) if not needs_review else None
+        best_effort_name = _build_best_effort_name(name) if not needs_review else None
     else:
         rename_hint = "(日付不明: 要確認)"
         best_effort_name = None
+
+    # OCR が成功したなら、OCR 候補をメインの rename 候補として使う
+    display_rename = ocr_rename_candidate if ocr_rename_candidate else (best_effort_name or rename_hint)
 
     return {
         "path": path,
@@ -147,127 +153,414 @@ def analyze_file(path: Path) -> Dict:
         "needs_ocr_review": needs_ocr_review,
         "rename_hint": rename_hint,
         "best_effort_name": best_effort_name,
+        "display_rename": display_rename,
+        "ocr_text": ocr_text,
+        "ocr_fields": ocr_fields,
+        "ocr_rename_candidate": ocr_rename_candidate,
         "warnings": warnings,
     }
 
 
 # ---------------------------------------------------------------------------
-# Safe copy helpers
+# Safe copy
 # ---------------------------------------------------------------------------
 
-def resolve_dest_path(dest_dir: Path, filename: str) -> Path:
-    """
-    コピー先に同名ファイルが存在する場合、連番サフィックスを付与して返す。
-    例: foo.pdf → foo-001.pdf → foo-002.pdf
-    """
+def _resolve_dest(dest_dir: Path, filename: str) -> Path:
+    """同名ファイルがある場合は -001, -002 ... の連番を付与して返す。"""
     candidate = dest_dir / filename
     if not candidate.exists():
         return candidate
-
     stem = Path(filename).stem
     suffix = Path(filename).suffix
     for i in range(1, 1000):
-        new_name = f"{stem}-{i:03d}{suffix}"
-        candidate = dest_dir / new_name
+        candidate = dest_dir / f"{stem}-{i:03d}{suffix}"
         if not candidate.exists():
             return candidate
-
-    raise RuntimeError(f"Could not find a free filename for {filename} after 999 attempts")
+    raise RuntimeError(f"No free filename for {filename}")
 
 
 def copy_to_renamed(src: Path, dest_name: str) -> Path:
-    """inbox のファイルを renamed/ にコピーする（元ファイルは残す）。"""
     RENAMED_DIR.mkdir(parents=True, exist_ok=True)
-    dest = resolve_dest_path(RENAMED_DIR, dest_name)
+    dest = _resolve_dest(RENAMED_DIR, dest_name)
     shutil.copy2(src, dest)
     return dest
 
 
 # ---------------------------------------------------------------------------
-# Report writers
+# Report: JSON
 # ---------------------------------------------------------------------------
 
-def write_review_report(items: List[Dict], timestamp: str) -> Path:
+def _write_json_report(items: List[Dict], path: Path) -> None:
+    report = {
+        "generated_at": datetime.now().isoformat(),
+        "count": len(items),
+        "files": [
+            {
+                "name": item["name"],
+                "warnings": item["warnings"],
+                "rename_hint": item["rename_hint"],
+                "ocr_rename_candidate": item.get("ocr_rename_candidate", ""),
+                "ocr_fields": item.get("ocr_fields", {}),
+            }
+            for item in items
+        ],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Report: Markdown
+# ---------------------------------------------------------------------------
+
+def _write_markdown_report(items: List[Dict], path: Path, report_type: str) -> None:
+    lines = [
+        f"# {report_type} レポート",
+        f"",
+        f"生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ",
+        f"件数: {len(items)}",
+        f"",
+        f"> このファイルは人間確認用です。JSON は機械処理用として別途生成されています。",
+        f"",
+        f"---",
+        f"",
+        f"| 元ファイル | OCR 推定内容 | rename 候補 | 警告 | 人間確認 |",
+        f"|---|---|---|---|---|",
+    ]
+
+    for item in items:
+        name = item["name"]
+        fields = item.get("ocr_fields", {})
+        ocr_summary = ""
+        if fields:
+            parts = []
+            if fields.get("document"):
+                parts.append(fields["document"])
+            if fields.get("counterparty"):
+                parts.append(fields["counterparty"])
+            if fields.get("amount_jpy"):
+                parts.append(f"{fields['amount_jpy']}円")
+            ocr_summary = " / ".join(parts) if parts else "（テキスト抽出済み）"
+        elif item.get("ocr_text"):
+            ocr_summary = item["ocr_text"][:30].replace("\n", " ") + "..."
+        else:
+            ocr_summary = "（OCR なし / 対象外）"
+
+        rename = item.get("ocr_rename_candidate") or item.get("rename_hint", "")
+        warnings = "、".join(item["warnings"]) if item["warnings"] else "—"
+
+        lines.append(
+            f"| `{name}` | {ocr_summary} | `{rename}` | {warnings} | □ OK / □ 修正 |"
+        )
+
+    lines += [
+        "",
+        "---",
+        "",
+        "## 詳細",
+        "",
+    ]
+
+    for item in items:
+        lines += [
+            f"### {item['name']}",
+            "",
+        ]
+        if item["warnings"]:
+            lines.append("**警告:**")
+            for w in item["warnings"]:
+                lines.append(f"- ⚠ {w}")
+            lines.append("")
+
+        rename = item.get("ocr_rename_candidate") or item.get("rename_hint", "")
+        lines += [
+            f"**rename 候補:** `{rename}`",
+            "",
+        ]
+
+        fields = item.get("ocr_fields", {})
+        if fields:
+            lines += [
+                "**OCR 推定フィールド:**",
+                "",
+                f"| フィールド | 推定値 |",
+                f"|---|---|",
+                f"| date | {fields.get('date', '')} |",
+                f"| category | {fields.get('category', '')} |",
+                f"| document | {fields.get('document', '')} |",
+                f"| counterparty | {fields.get('counterparty', '')} |",
+                f"| amount_jpy | {fields.get('amount_jpy', '')} |",
+                "",
+            ]
+
+        ocr_text = item.get("ocr_text", "")
+        if ocr_text:
+            snippet = ocr_text[:400].replace("\n", "  \n")
+            lines += [
+                "<details>",
+                "<summary>OCR テキスト（クリックで展開）</summary>",
+                "",
+                f"```",
+                snippet,
+                f"```",
+                "",
+                "</details>",
+                "",
+            ]
+
+        lines += [
+            "**人間確認メモ:**",
+            "",
+            "```",
+            "判定: [ ] OK  [ ] 修正  [ ] 廃棄",
+            "修正後ファイル名:",
+            "備考:",
+            "```",
+            "",
+            "---",
+            "",
+        ]
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Report: HTML
+# ---------------------------------------------------------------------------
+
+def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
+    esc = html_module.escape
+
+    cards = []
+    for item in items:
+        name = esc(item["name"])
+        rename = esc(item.get("ocr_rename_candidate") or item.get("rename_hint", ""))
+        warnings_html = "".join(
+            f'<li class="warn">⚠ {esc(w)}</li>' for w in item["warnings"]
+        ) if item["warnings"] else "<li>—</li>"
+
+        fields = item.get("ocr_fields", {})
+        fields_rows = ""
+        if fields:
+            for k, v in fields.items():
+                if v:
+                    fields_rows += f"<tr><td>{esc(k)}</td><td>{esc(str(v))}</td></tr>"
+
+        ocr_text = esc(item.get("ocr_text", "")) or "（OCR テキストなし）"
+        ocr_snippet = ocr_text[:600]
+
+        status_cls = "ocr-error" if item.get("needs_ocr_review") else "review"
+
+        cards.append(f"""
+  <div class="card {status_cls}">
+    <div class="card-header">
+      <span class="badge {'badge-ocr' if item.get('needs_ocr_review') else 'badge-review'}">
+        {'OCR ERROR' if item.get('needs_ocr_review') else 'REVIEW'}
+      </span>
+      <span class="filename">{name}</span>
+    </div>
+
+    <div class="section">
+      <div class="label">rename 候補</div>
+      <div class="rename-candidate">{rename}</div>
+    </div>
+
+    <div class="section">
+      <div class="label">警告</div>
+      <ul class="warn-list">{warnings_html}</ul>
+    </div>
+
+    {"<div class='section'><div class='label'>OCR 推定フィールド</div><table class='fields'><tr><th>フィールド</th><th>推定値</th></tr>" + fields_rows + "</table></div>" if fields_rows else ""}
+
+    <details class="ocr-details">
+      <summary>OCR テキスト（クリックで展開）</summary>
+      <pre class="ocr-text">{ocr_snippet}</pre>
+    </details>
+
+    <div class="section">
+      <div class="label">人間確認メモ</div>
+      <div class="memo-area">
+        <label><input type="checkbox"> OK — このまま rename する</label><br>
+        <label><input type="checkbox"> 修正 — ファイル名を変更する</label><br>
+        <label><input type="checkbox"> 廃棄 — このファイルは保管不要</label><br>
+        <div class="memo-input">
+          修正後ファイル名: <input type="text" placeholder="{rename}" style="width:100%">
+          備考: <input type="text" placeholder="メモを入力" style="width:100%">
+        </div>
+      </div>
+    </div>
+  </div>
+""")
+
+    summary_row = "".join(
+        f"<tr><td><code>{esc(item['name'])}</code></td>"
+        f"<td><code>{esc(item.get('ocr_rename_candidate') or item.get('rename_hint', ''))}</code></td>"
+        f"<td>{'、'.join(esc(w) for w in item['warnings']) or '—'}</td></tr>"
+        for item in items
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{esc(report_type)} — {datetime.now().strftime('%Y-%m-%d %H:%M')}</title>
+<style>
+  body {{ font-family: -apple-system, 'Hiragino Sans', sans-serif; margin: 0; background: #f5f5f7; color: #1d1d1f; font-size: 14px; }}
+  h1 {{ background: #1d1d1f; color: #fff; margin: 0; padding: 16px 24px; font-size: 18px; font-weight: 600; }}
+  .meta {{ background: #fff; padding: 12px 24px; border-bottom: 1px solid #e0e0e0; color: #555; font-size: 12px; }}
+  .summary-table {{ margin: 20px 24px; background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); overflow: hidden; }}
+  .summary-table h2 {{ margin: 0; padding: 12px 16px; font-size: 14px; background: #f0f0f0; border-bottom: 1px solid #ddd; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  th {{ background: #f7f7f7; padding: 8px 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+  td {{ padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }}
+  tr:last-child td {{ border-bottom: none; }}
+  .cards {{ padding: 0 24px 24px; }}
+  .card {{ background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.10); margin-bottom: 20px; overflow: hidden; }}
+  .card-header {{ padding: 12px 16px; background: #f7f7f7; border-bottom: 1px solid #e8e8e8; display: flex; align-items: center; gap: 10px; }}
+  .filename {{ font-weight: 600; font-size: 13px; word-break: break-all; }}
+  .badge {{ padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }}
+  .badge-review {{ background: #fff3cd; color: #856404; }}
+  .badge-ocr {{ background: #f8d7da; color: #842029; }}
+  .section {{ padding: 10px 16px; border-bottom: 1px solid #f5f5f5; }}
+  .section:last-child {{ border-bottom: none; }}
+  .label {{ font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }}
+  .rename-candidate {{ font-family: monospace; font-size: 13px; background: #f0f7ff; padding: 6px 10px; border-radius: 4px; border-left: 3px solid #0071e3; word-break: break-all; }}
+  .warn-list {{ margin: 0; padding-left: 18px; }}
+  .warn {{ color: #c0392b; }}
+  .fields {{ width: 100%; font-size: 12px; border-collapse: collapse; }}
+  .fields th, .fields td {{ padding: 4px 8px; text-align: left; border: 1px solid #eee; }}
+  .fields th {{ background: #f7f7f7; }}
+  .ocr-details {{ padding: 10px 16px; border-top: 1px solid #f5f5f5; }}
+  .ocr-details summary {{ cursor: pointer; color: #0071e3; font-size: 12px; }}
+  .ocr-text {{ font-size: 12px; background: #f9f9f9; padding: 10px; border-radius: 4px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; margin-top: 8px; }}
+  .memo-area {{ background: #fafff4; border: 1px solid #d4edda; border-radius: 6px; padding: 10px 14px; }}
+  .memo-area label {{ display: block; margin: 4px 0; }}
+  .memo-input {{ margin-top: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }}
+  input[type=text] {{ border: 1px solid #ccc; border-radius: 4px; padding: 4px 8px; font-size: 12px; }}
+  code {{ background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 12px; }}
+</style>
+</head>
+<body>
+<h1>📋 {esc(report_type)}</h1>
+<div class="meta">
+  生成日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} &nbsp;|&nbsp;
+  件数: {len(items)} &nbsp;|&nbsp;
+  ⚠ rename 候補はあくまで OCR 推定です。必ず内容を確認してください。
+</div>
+
+<div class="summary-table">
+  <h2>サマリー</h2>
+  <table>
+    <tr><th>元ファイル</th><th>rename 候補</th><th>警告</th></tr>
+    {summary_row}
+  </table>
+</div>
+
+<div class="cards">
+{"".join(cards)}
+</div>
+
+<script>
+  // ページ印刷時にすべての details を展開する
+  window.onbeforeprint = () => document.querySelectorAll('details').forEach(d => d.open = true);
+  window.onafterprint = () => document.querySelectorAll('details').forEach(d => d.open = false);
+</script>
+</body>
+</html>"""
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+
+# ---------------------------------------------------------------------------
+# Report writers (orchestrator)
+# ---------------------------------------------------------------------------
+
+def write_review_reports(items: List[Dict], timestamp: str) -> Dict[str, Path]:
     REVIEW_DIR.mkdir(parents=True, exist_ok=True)
-    report_path = REVIEW_DIR / f"review-report-{timestamp}.json"
-    report = {
-        "generated_at": datetime.now().isoformat(),
-        "count": len(items),
-        "files": [
-            {"name": item["name"], "warnings": item["warnings"], "rename_hint": item["rename_hint"]}
-            for item in items
-        ],
-    }
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    return report_path
+    base = f"review-report-{timestamp}"
+    paths = {}
+
+    json_path = REVIEW_DIR / f"{base}.json"
+    _write_json_report(items, json_path)
+    paths["json"] = json_path
+
+    md_path = REVIEW_DIR / f"{base}.md"
+    _write_markdown_report(items, md_path, "REVIEW REQUIRED")
+    paths["md"] = md_path
+
+    html_path = REVIEW_DIR / f"{base}.html"
+    _write_html_report(items, html_path, "REVIEW REQUIRED")
+    paths["html"] = html_path
+
+    return paths
 
 
-def write_ocr_error_report(items: List[Dict], timestamp: str) -> Path:
+def write_ocr_error_reports(items: List[Dict], timestamp: str) -> Dict[str, Path]:
     OCR_ERROR_DIR.mkdir(parents=True, exist_ok=True)
-    report_path = OCR_ERROR_DIR / f"ocr-error-report-{timestamp}.json"
-    report = {
-        "generated_at": datetime.now().isoformat(),
-        "count": len(items),
-        "files": [
-            {"name": item["name"], "warnings": item["warnings"]}
-            for item in items
-        ],
-    }
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    return report_path
+    base = f"ocr-error-report-{timestamp}"
+    paths = {}
+
+    json_path = OCR_ERROR_DIR / f"{base}.json"
+    _write_json_report(items, json_path)
+    paths["json"] = json_path
+
+    md_path = OCR_ERROR_DIR / f"{base}.md"
+    _write_markdown_report(items, md_path, "OCR ERROR")
+    paths["md"] = md_path
+
+    html_path = OCR_ERROR_DIR / f"{base}.html"
+    _write_html_report(items, html_path, "OCR ERROR")
+    paths["html"] = html_path
+
+    return paths
 
 
 # ---------------------------------------------------------------------------
 # Log writer
 # ---------------------------------------------------------------------------
 
-def write_log(
-    mode: str,
-    timestamp: str,
-    total: int,
-    normal_count: int,
-    copied: int,
-    review_count: int,
-    ocr_count: int,
-    metadata_count: int,
-    details: List[Dict],
+def _write_log(
+    mode: str, timestamp: str, total: int, normal_count: int,
+    copied: int, review_count: int, ocr_count: int,
+    metadata_count: int, use_ocr: bool, details: List[Dict],
 ) -> Path:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOGS_DIR / f"process-inbox-{timestamp}.log"
-
     lines = [
-        f"=== process_inbox.py log ===",
+        "=== process_inbox.py log ===",
         f"timestamp   : {datetime.now().isoformat()}",
         f"mode        : {mode}",
-        f"",
-        f"[counts]",
+        f"ocr         : {'enabled' if use_ocr else 'disabled (--no-ocr)'}",
+        "",
+        "[counts]",
         f"  total files     : {total}",
         f"  rename 候補     : {normal_count}",
         f"  copy 実行数     : {copied}",
         f"  review-required : {review_count}",
         f"  ocr-error       : {ocr_count}",
         f"  metadata 生成数 : {metadata_count}",
-        f"",
-        f"[detail]",
+        "",
+        "[detail]",
     ]
-
     for d in details:
         status = d.get("status", "-")
         src = d.get("src", "")
         dest = d.get("dest", "")
         warn = ", ".join(d.get("warnings", []))
+        ocr_ok = "OCR:OK" if d.get("ocr_ok") else ("OCR:FAIL" if d.get("ocr_fail") else "")
+        suffix = f"  [{ocr_ok}]" if ocr_ok else ""
         if dest:
-            lines.append(f"  [{status}] {src} → {dest}")
+            lines.append(f"  [{status}] {src} → {dest}{suffix}")
         elif warn:
-            lines.append(f"  [{status}] {src}  ⚠ {warn}")
+            lines.append(f"  [{status}] {src}  ⚠ {warn}{suffix}")
         else:
-            lines.append(f"  [{status}] {src}")
+            lines.append(f"  [{status}] {src}{suffix}")
 
     with open(log_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
-
     return log_path
 
 
@@ -275,36 +568,41 @@ def write_log(
 # Display helpers
 # ---------------------------------------------------------------------------
 
-def print_section(title: str) -> None:
-    print("=" * 60)
-    print(title)
-    print("=" * 60)
-
-
-def print_divider() -> None:
-    print("-" * 60)
+def _sep(char: str = "=", width: int = 60) -> None:
+    print(char * width)
 
 
 # ---------------------------------------------------------------------------
-# Main logic
+# Main
 # ---------------------------------------------------------------------------
 
-def run(apply: bool) -> None:
+def run(apply: bool, use_ocr: bool) -> None:
     mode = "apply" if apply else "dry-run"
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 
-    classified = scan_inbox(INBOX_DIR)
-    all_files: List[Path] = classified["PDF"] + classified["IMAGE"] + classified["UNSUPPORTED"]
+    if use_ocr and not ensure_ocr_binary():
+        print("⚠ OCR バイナリのコンパイルに失敗しました。--no-ocr で再実行するか、")
+        print("  swiftc scripts/vision_ocr.swift -o scripts/vision_ocr を手動実行してください。")
+        use_ocr = False
 
-    print_section(f"[SCAN]  mode={mode}")
+    classified = scan_inbox(INBOX_DIR)
+    all_files = classified["PDF"] + classified["IMAGE"] + classified["UNSUPPORTED"]
+
+    _sep()
+    print(f"[SCAN]  mode={mode}  ocr={'on' if use_ocr else 'off'}")
+    _sep()
     print(f"Found {len(all_files)} files in inbox/")
+    if use_ocr:
+        print(f"Running OCR on {len(classified['PDF']) + len(classified['IMAGE'])} files ...")
     print()
 
-    if not all_files:
-        print("  inbox is empty. Nothing to process.")
-        return
+    analyses = []
+    for f in all_files:
+        sys.stdout.write(f"  Analyzing: {f.name[:50]!s:<52}\r")
+        sys.stdout.flush()
+        analyses.append(analyze_file(f, use_ocr))
+    sys.stdout.write(" " * 60 + "\r")
 
-    analyses = [analyze_file(f) for f in all_files]
     normal = [a for a in analyses if not a["needs_review"]]
     review_needed = [a for a in analyses if a["needs_review"] and not a["needs_ocr_review"]]
     ocr_errors = [a for a in analyses if a["needs_ocr_review"]]
@@ -314,123 +612,116 @@ def run(apply: bool) -> None:
     metadata_count = 0
 
     # -----------------------------------------------------------------------
-    # [SUGGEST] — Normal files
+    # Normal files — SUGGEST or APPLY
     # -----------------------------------------------------------------------
-    if normal:
-        label = "[APPLY] — rename 候補を renamed/ へコピー" if apply else "[SUGGEST] — rename 候補（dry-run: ファイルは変更しない）"
-        print(label)
-        print_divider()
+    label = "[APPLY] — safe copy to renamed/" if apply else "[SUGGEST] — rename 候補（dry-run: 変更なし）"
+    print(label)
+    _sep("-")
+    for item in normal:
+        tags_info = f" [tag: {', '.join(item['tags'])}]" if item["tags"] else ""
+        rename = item["display_rename"]
+        ocr_info = " (OCR推定)" if item.get("ocr_rename_candidate") else " (filename推定)"
 
-        for item in normal:
-            tags_info = f" [tag: {', '.join(item['tags'])}]" if item["tags"] else ""
-            best = item["best_effort_name"] or item["rename_hint"]
-
-            if apply:
-                dest_path = copy_to_renamed(item["path"], best)
-                dest_rel = dest_path.relative_to(REPO_ROOT)
-
-                metadata = generate_metadata(dest_path.name, source_filename=item["name"])
-                metadata["status"] = "renamed"
-                meta_path = save_metadata(metadata, METADATA_READY_DIR)
-                meta_rel = meta_path.relative_to(REPO_ROOT)
-
-                copied_count += 1
-                metadata_count += 1
-                print(f"  [COPY]  {item['name']}{tags_info}")
-                print(f"          → {dest_rel}")
-                print(f"  [META]  → {meta_rel}")
-
-                log_details.append({
-                    "status": "COPY",
-                    "src": item["name"],
-                    "dest": str(dest_rel),
-                    "warnings": [],
-                })
-            else:
-                print(f"  {item['name']}{tags_info}")
-                print(f"  → {best}")
-                log_details.append({
-                    "status": "DRY-RUN",
-                    "src": item["name"],
-                    "dest": best,
-                    "warnings": [],
-                })
-        print()
+        if apply:
+            dest_path = copy_to_renamed(item["path"], rename)
+            dest_rel = dest_path.relative_to(REPO_ROOT)
+            metadata = generate_metadata(dest_path.name, source_filename=item["name"])
+            metadata["status"] = "renamed"
+            meta_path = save_metadata(metadata, METADATA_READY_DIR)
+            meta_rel = meta_path.relative_to(REPO_ROOT)
+            copied_count += 1
+            metadata_count += 1
+            print(f"  [COPY]  {item['name']}{tags_info}")
+            print(f"          → {dest_rel}{ocr_info}")
+            print(f"  [META]  → {meta_rel}")
+            log_details.append({"status": "COPY", "src": item["name"], "dest": str(dest_rel),
+                                 "ocr_ok": bool(item.get("ocr_text"))})
+        else:
+            print(f"  {item['name']}{tags_info}")
+            print(f"  → {rename}{ocr_info}")
+            log_details.append({"status": "DRY-RUN", "src": item["name"], "dest": rename,
+                                 "ocr_ok": bool(item.get("ocr_text"))})
+    print()
 
     # -----------------------------------------------------------------------
-    # [WARNING] — OCR errors
+    # OCR errors
     # -----------------------------------------------------------------------
     if ocr_errors:
         print("[WARNING] — OCR 文字化けの可能性あり（--apply でも処理対象外）")
-        print_divider()
+        _sep("-")
         for item in ocr_errors:
             print(f"  {item['name']}")
             for w in item["warnings"]:
                 print(f"    ⚠ {w}")
-            print(f"    → rename hint: {item['rename_hint']}")
-            log_details.append({"status": "OCR-ERROR", "src": item["name"], "warnings": item["warnings"]})
+            rename = item.get("ocr_rename_candidate") or item["rename_hint"]
+            print(f"    → rename 候補: {rename}")
+            log_details.append({"status": "OCR-ERROR", "src": item["name"],
+                                 "warnings": item["warnings"], "ocr_ok": bool(item.get("ocr_text"))})
         print()
-        ocr_report = write_ocr_error_report(ocr_errors, timestamp)
-        print(f"  レポート保存: {ocr_report.relative_to(REPO_ROOT)}")
+        ocr_rpts = write_ocr_error_reports(ocr_errors, timestamp)
+        print(f"  レポート保存:")
+        for fmt, p in ocr_rpts.items():
+            print(f"    [{fmt.upper()}] {p.relative_to(REPO_ROOT)}")
         print()
 
     # -----------------------------------------------------------------------
-    # [REVIEW REQUIRED] — Other issues
+    # Review required
     # -----------------------------------------------------------------------
     if review_needed:
         print("[REVIEW REQUIRED] — 確認が必要なファイル（--apply でも処理対象外）")
-        print_divider()
+        _sep("-")
         for item in review_needed:
             print(f"  {item['name']}")
             for w in item["warnings"]:
                 print(f"    ⚠ {w}")
-            print(f"    → rename hint: {item['rename_hint']}")
-            log_details.append({"status": "REVIEW", "src": item["name"], "warnings": item["warnings"]})
+            rename = item.get("ocr_rename_candidate") or item["rename_hint"]
+            print(f"    → rename 候補: {rename}")
+            log_details.append({"status": "REVIEW", "src": item["name"],
+                                 "warnings": item["warnings"], "ocr_ok": bool(item.get("ocr_text"))})
         print()
-        review_report = write_review_report(review_needed, timestamp)
-        print(f"  レポート保存: {review_report.relative_to(REPO_ROOT)}")
+        rev_rpts = write_review_reports(review_needed, timestamp)
+        print(f"  レポート保存:")
+        for fmt, p in rev_rpts.items():
+            print(f"    [{fmt.upper()}] {p.relative_to(REPO_ROOT)}")
         print()
 
     # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
-    print_section("[SUMMARY]")
+    _sep()
+    print("[SUMMARY]")
+    _sep()
     print(f"  mode           : {mode}")
+    print(f"  ocr            : {'enabled' if use_ocr else 'disabled'}")
     print(f"  total          : {len(analyses)}")
     print(f"  rename 候補    : {len(normal)}")
-    print(f"  copy 実行      : {copied_count}  {'(dry-run のため 0)' if not apply else ''}")
-    print(f"  metadata 生成  : {metadata_count}  {'(dry-run のため 0)' if not apply else ''}")
-    print(f"  ocr-error      : {len(ocr_errors)}  → processing/ocr-error/ にレポート")
-    print(f"  review-required: {len(review_needed)}  → processing/review-required/ にレポート")
-    print("=" * 60)
+    print(f"  copy 実行      : {copied_count}  {'(dry-run: 0)' if not apply else ''}")
+    print(f"  metadata 生成  : {metadata_count}  {'(dry-run: 0)' if not apply else ''}")
+    print(f"  ocr-error      : {len(ocr_errors)}")
+    print(f"  review-required: {len(review_needed)}")
+    _sep()
 
-    log_path = write_log(
-        mode=mode,
-        timestamp=timestamp,
-        total=len(analyses),
-        normal_count=len(normal),
-        copied=copied_count,
-        review_count=len(review_needed),
-        ocr_count=len(ocr_errors),
-        metadata_count=metadata_count,
-        details=log_details,
+    log_path = _write_log(
+        mode=mode, timestamp=timestamp, total=len(analyses),
+        normal_count=len(normal), copied=copied_count,
+        review_count=len(review_needed), ocr_count=len(ocr_errors),
+        metadata_count=metadata_count, use_ocr=use_ocr, details=log_details,
     )
     print(f"\n  ログ保存: {log_path.relative_to(REPO_ROOT)}")
     print()
 
     if not apply:
         print("Next steps:")
-        print("  1. rename hint を確認し、問題なければ --apply を実行")
-        print("  2. OCR エラー / review 対象は内容を目視確認してから手動で renamed/ へコピー")
-        print("  3. python scripts/generate_metadata.py で残りの metadata を生成")
-        print("  4. metadata を補完後に export/ または archive/ へ移動")
-        print("  5. docs/export-rules.md の条件を満たしてから export/ へ")
+        print("  1. rename 候補（OCR推定）を確認し、問題なければ --apply を実行")
+        print("  2. OCR エラー / review 対象は review-report-*.html を開いて確認")
+        print("     → 人間確認後に --apply-review（将来実装）で反映")
+        print("  3. python scripts/process_inbox.py --apply で safe copy 実行")
     else:
         print("Next steps:")
-        print("  1. processing/renamed/ のファイル名を確認し、Category を手動で追記")
-        print("  2. processing/metadata-ready/ の .metadata.json を開いて category 等を補完")
-        print("  3. OCR エラー / review 対象は内容を目視確認してから手動で renamed/ へコピー")
-        print("  4. docs/export-rules.md の条件を満たしたら export/ または archive/ へ移動")
+        print("  1. processing/renamed/ のファイル名を確認・必要なら Category を手修正")
+        print("  2. processing/metadata-ready/ の .metadata.json で category 等を補完")
+        print("  3. OCR エラー / review 対象は review-report-*.html を開いて手動対応")
+        print("  4. docs/export-rules.md の条件を満たしたら export/ または archive/ へ")
 
 
 # ---------------------------------------------------------------------------
@@ -439,18 +730,20 @@ def run(apply: bool) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="inbox を分析し、safe copy と metadata 生成を行う",
+        description="inbox を分析・rename・metadata 生成する",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  python scripts/process_inbox.py            # dry-run（デフォルト）
-  python scripts/process_inbox.py --dry-run  # 分析のみ、ファイルは変更しない
-  python scripts/process_inbox.py --apply    # renamed/ へコピー + metadata 生成
+  python scripts/process_inbox.py              # dry-run + OCR（デフォルト）
+  python scripts/process_inbox.py --dry-run    # 同上
+  python scripts/process_inbox.py --no-ocr     # OCR なしで高速に実行
+  python scripts/process_inbox.py --apply      # renamed/ へ safe copy + metadata 生成
         """,
     )
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--dry-run", action="store_true", default=False, help="分析のみ（デフォルト）")
-    group.add_argument("--apply", action="store_true", default=False, help="rename copy + metadata 生成を実行")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--dry-run", action="store_true", default=False)
+    mode_group.add_argument("--apply", action="store_true", default=False)
+    parser.add_argument("--no-ocr", action="store_true", default=False, help="OCR をスキップ")
     args = parser.parse_args()
 
-    run(apply=args.apply)
+    run(apply=args.apply, use_ocr=not args.no_ocr)

@@ -64,19 +64,26 @@ python scripts/normalize_documents.py
 
 ファイル一覧・文字化け検出・リネームヒントを表示する（ファイルは動かさない）。
 
-### Step 3 — analyze / dry-run（分析・レポート生成）
+### Step 3 — analyze / dry-run（OCR分析・レポート生成）
 
 ```bash
-python scripts/process_inbox.py          # デフォルトは --dry-run
+python scripts/process_inbox.py          # デフォルトは --dry-run + OCR
 python scripts/process_inbox.py --dry-run
+python scripts/process_inbox.py --no-ocr # OCR なしで高速実行
 ```
 
 **`--dry-run` がデフォルト。ファイルは一切変更しない。**
 
-- rename 候補を表示（ベストエフォートで日付・ファイル名を整形）
-- 文字化け疑い → `processing/ocr-error/` にレポート
-- 要確認 → `processing/review-required/` にレポート
+- **ファイル名ではなく PDF の中身を OCR して** rename 候補を生成（macOS Vision Framework 使用）
+- rename 候補フォーマット: `YYYYMMDD-Category-Document-Counterparty.pdf`
+- 文字化け疑い → `processing/ocr-error/` に JSON / Markdown / HTML レポートを生成
+- 要確認 → `processing/review-required/` に JSON / Markdown / HTML レポートを生成
 - 実行ログ → `logs/process-inbox-YYYYMMDD-HHMMSS.log`
+
+**レポートの使い分け**
+- `.json` → 機械処理用（スクリプトからの読み取り）
+- `.md` → テキストエディタ・Obsidian で確認
+- `.html` → ブラウザで開く（OCR テキスト展開・チェックボックス付き）
 
 ### Step 4 — review（人間 + Claude Cowork による確認）
 
