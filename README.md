@@ -32,43 +32,81 @@
 
 ```
 document-flow-agent/
-├── inbox/          # iPhone スキャン PDFの投入先
-├── processing/     # 分類・OCR・リネーム処理中
-├── archive/        # ローカル整理済ファイル
-├── export/         # Dropbox 移動予定ファイル
-├── scripts/        # Python スクリプト群
-├── logs/           # 処理ログ
-├── templates/      # metadata テンプレート
-└── docs/           # 運用方針・アーキテクチャメモ
+├── inbox/                    # iPhone スキャン PDFの投入先（自由・生状態）
+├── processing/               # 分類・OCR・リネーム処理中
+│   ├── review-required/      # 確認が必要なファイルのレポート
+│   ├── renamed/              # リネーム済みファイル
+│   ├── metadata-ready/       # metadata JSON 生成済みファイル
+│   └── ocr-error/            # 文字化け疑いのレポート
+├── archive/                  # ローカル整理済ファイル
+├── export/                   # Dropbox 移動予定ファイル（人間確認済みバッファ）
+├── scripts/                  # Python スクリプト群
+├── logs/                     # 処理ログ
+├── templates/                # metadata テンプレート
+└── docs/                     # 運用方針・アーキテクチャメモ
 ```
 
 ---
 
-## 処理フロー
+## 処理フロー（半自動レビュー運用）
 
-### Step 1 — スキャン
-iPhone で書類をスキャンする（PDF 推奨）。
+完全自動化ではなく、**安全確認付き半自動運用**が基本方針です。  
+詳細は [`docs/workflow.md`](docs/workflow.md) を参照してください。
 
-### Step 2 — inbox へ格納
-スキャンした PDF を `inbox/` フォルダへ移動する。
-ファイル名は仮でよい（例: `scan_20260517.pdf`）。
+### Step 1 — スキャン → inbox
+iPhone でスキャン後、`inbox/` に配置する。ファイル名・形式は自由。
 
-### Step 3 — Claude Cowork で分類支援
-Claude Cowork を起動し、inbox のファイルを確認。
-カテゴリ・タイトル・保存期間を元に分類・リネームを行う。
-`scripts/classify_documents.py` と `scripts/rename_documents.py` を活用する。
+### Step 2 — normalize（現状確認）
 
-### Step 4 — archive または export へ移動
-- ローカルに残すもの → `archive/`
-- Dropbox へ送るもの → `export/`
+```bash
+python scripts/normalize_documents.py
+```
 
-### Step 5 — 月次で Dropbox へ手動移動
-`export/` 内のファイルを Dropbox の対応フォルダへ移動する。
-移動後は `export/` を空にする。
+ファイル一覧・文字化け検出・リネームヒントを表示する（ファイルは動かさない）。
 
-### Step 6 — 必要なもののみ Notion へ登録
-期限・アクション・重要性があるファイルだけ Notion に登録する。
-`templates/metadata_template.json` をベースにメタデータを付与する。
+### Step 3 — analyze（分析・レポート生成）
+
+```bash
+python scripts/process_inbox.py
+```
+
+rename 候補を提示し、OCR エラー・要確認ファイルをレポートとして書き出す。
+
+- 文字化け疑い → `processing/ocr-error/` にレポート
+- 要確認 → `processing/review-required/` にレポート
+
+**inbox のファイルは動かさない。**
+
+### Step 4 — review（人間 + Claude Cowork による確認）
+
+- `ocr-error/` レポートを確認 → PDF を開いて文字化けを修正
+- `review-required/` レポートを確認 → Category を決定
+- 廃棄対象は inbox から削除
+
+### Step 5 — rename → metadata 生成
+
+確認済みファイルを命名規約のファイル名で `processing/renamed/` へ手動コピー後:
+
+```bash
+python scripts/generate_metadata.py
+```
+
+`processing/metadata-ready/` に `.metadata.json` が生成される。metadata を目視確認・補完する。
+
+### Step 6 — export または archive へ移動（人間による最終確認）
+
+[`docs/export-rules.md`](docs/export-rules.md) の export 可能条件を満たしたものを移動する。
+
+- ローカル保管 → `archive/`
+- Dropbox 送出予定 → `export/`
+
+### Step 7 — 月次で Dropbox へ手動転送
+
+`export/` の内容を Dropbox の `00_DocumentVault/99_Imported/` へ手動移動する。
+
+### Step 8 — 重要なもののみ Notion に登録
+
+期限・アクション・重要性があるファイルのみ Notion に登録する。
 
 ---
 
@@ -123,11 +161,24 @@ Category 一覧は [`docs/categories.md`](docs/categories.md)、支払手段は 
 
 ---
 
+## スクリプト一覧
+
+| スクリプト | 役割 | 実行タイミング |
+|---|---|---|
+| `normalize_documents.py` | inbox のファイル一覧・文字化け検出 | 月次処理開始時 |
+| `process_inbox.py` | 分析・rename 候補・レポート生成 | normalize の次 |
+| `rename_documents.py` | 命名規約のファイル名生成・検証 | rename 時に参照 |
+| `generate_metadata.py` | metadata scaffold 生成 | renamed/ 配置後 |
+| `export_to_dropbox.py` | export/ → Dropbox 転送 | 月次・手動 |
+| `scan_inbox_watcher.py` | inbox 監視（将来実装） | 常駐 |
+
+---
+
 ## 運用ルール（Claude Cowork 向け）
 
-- inbox にファイルがある場合、最初に `python scripts/normalize_documents.py` で一覧を確認してから処理を開始する
+- 月次処理は `docs/workflow.md` のチェックリストに沿って進める
+- **inbox のファイルは絶対に削除・移動しない**（コピーのみ）
 - 分類・リネームは `docs/naming-convention.md` と `docs/categories.md` を参照する
-- 判断できないファイルは `processing/` に留め置き、コメントをログに残す
+- export は `docs/export-rules.md` の条件を満たしたもののみ
 - `logs/` には処理日時・ファイル名・アクションを記録する
-- 月次処理後、`export/` が空になっていることを確認する
 - `Other` カテゴリが溜まってきたら新しい Category 追加を検討する

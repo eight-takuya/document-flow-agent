@@ -19,7 +19,7 @@ VALID_FILENAME_PATTERN = re.compile(r"^\d{8}-[A-Za-z]+-[^-].+\.pdf$")
 
 CATEGORIES = {
     "Action", "Tax", "Insurance", "Medical", "School",
-    "Contract", "Expense", "Receipt", "Utility", "Government",
+    "Contract", "Work", "Expense", "Receipt", "Utility", "Government",
     "Family", "Asset", "Other",
 }
 

@@ -8,6 +8,22 @@ inbox/*
 
 processing/*
 !processing/.gitkeep
+!processing/review-required/
+!processing/renamed/
+!processing/metadata-ready/
+!processing/ocr-error/
+
+processing/review-required/*
+!processing/review-required/.gitkeep
+
+processing/renamed/*
+!processing/renamed/.gitkeep
+
+processing/metadata-ready/*
+!processing/metadata-ready/.gitkeep
+
+processing/ocr-error/*
+!processing/ocr-error/.gitkeep
 
 archive/*
 !archive/.gitkeep
