@@ -99,7 +99,8 @@ def _apply_rename(item: dict, logger: logging.Logger) -> bool:
         return False
 
     safe_name = re.sub(r'[<>:"/\\|?*]', "_", approved_name)
-    if not safe_name.lower().endswith(".pdf"):
+    _valid_exts = {".pdf", ".jpg", ".jpeg", ".png"}
+    if Path(safe_name).suffix.lower() not in _valid_exts:
         safe_name += ".pdf"
 
     RENAMED_DIR.mkdir(parents=True, exist_ok=True)

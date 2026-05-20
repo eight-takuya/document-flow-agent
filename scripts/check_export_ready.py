@@ -72,11 +72,15 @@ def _pending_review_files() -> list:
 
 
 def _renamed_pdfs() -> list:
-    pdfs = []
+    _DOC_SUFFIXES = {".pdf", ".jpg", ".jpeg", ".png"}
+    files = []
     for d in (RENAMED_DIR, AUTO_APPROVED_DIR):
         if d.exists():
-            pdfs.extend(f for f in d.glob("*.pdf") if f.name != ".gitkeep")
-    return pdfs
+            files.extend(
+                f for f in d.iterdir()
+                if f.is_file() and f.suffix.lower() in _DOC_SUFFIXES and f.name != ".gitkeep"
+            )
+    return files
 
 
 def _metadata_jsons() -> list:

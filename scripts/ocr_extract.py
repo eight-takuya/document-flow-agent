@@ -56,11 +56,41 @@ DATE_PATTERNS = [
 
 AMOUNT_PATTERN = re.compile(r"(\d{1,3}(?:,\d{3})*)\s*円")
 AMOUNT_YEN_PATTERN = re.compile(r"¥\s*(\d{1,3}(?:,\d{3})*)")
+# 「金額」ラベル直後の数値（郵便局払込控などで「円」が別行の場合）
+AMOUNT_LABEL_PATTERN = re.compile(r"金額\s*\n\s*(\d{1,3}(?:,\d{3})*)")
 
 COMPANY_PATTERNS = [
     re.compile(r"株式会社[\s　]*([\w぀-鿿＀-￯]+)"),
     re.compile(r"([\w぀-鿿＀-￯]+)[\s　]*株式会社"),
     re.compile(r"合同会社[\s　]*([\w぀-鿿＀-￯]+)"),
+]
+
+# 都道府県企業局・市区町村水道局検出パターン
+# 「加入者名千葉県企業局」のようなラベル+機関名にも対応: (?:...名)? で任意のラベルを読み飛ばす
+_GOVT_ENTITY_PATTERNS = [
+    re.compile(r"(?:[\w぀-鿿＀-￯]+名)?([\w぀-鿿＀-￯]{1,3}(?:県|都|府|道)企業局)"),
+    re.compile(r"(?:[\w぀-鿿＀-￯]+名)?([\w぀-鿿＀-￯]{1,5}(?:市|区|町|村)(?:上下水道局|水道局|下水道局))"),
+]
+
+# counterparty 誤検知を防ぐブロックリスト（OCR ゴミテキストを除外）
+COUNTERPARTY_BLOCKLIST = [
+    "登録商標", "QRコード", "コピーライト", "copyright", "Copyright",
+    "無断複製", "無断転載", "All Rights", "registered",
+]
+
+# ファイル名に含まれる支払手段キーワード → 正規化名
+PAYMENT_METHOD_FROM_FILENAME: List[tuple] = [
+    ("AMEX", "AMEX"),
+    ("SMBC", "SMBC"),
+    ("PayPay", "PayPay"),
+    ("RakutenCard", "RakutenCard"),
+    ("楽天カード", "RakutenCard"),
+    ("BankTransfer", "BankTransfer"),
+    ("振込", "BankTransfer"),
+    ("DirectDebit", "DirectDebit"),
+    ("口座振替", "DirectDebit"),
+    ("Cash", "Cash"),
+    ("現金", "Cash"),
 ]
 
 
@@ -167,6 +197,23 @@ def _extract_category(text: str) -> str:
     return "Other"
 
 
+def _is_counterparty_blocked(name: str) -> bool:
+    """ブロックリストに含まれる OCR ゴミテキストを弾く。"""
+    return any(blocked in name for blocked in COUNTERPARTY_BLOCKLIST)
+
+
+def _extract_govt_entity(text: str) -> str:
+    """
+    都道府県企業局・市区町村水道局を OCR テキストから抽出する。
+    「加入者名千葉県企業局」のようなラベル付き表記でも group(1) で機関名のみ取得できる。
+    """
+    for pat in _GOVT_ENTITY_PATTERNS:
+        m = pat.search(text)
+        if m and m.group(1):
+            return m.group(1)
+    return ""
+
+
 def _extract_counterparty(text: str, bracket_tags: List[str]) -> str:
     """
     OCR テキストから発行元・取引先を推定する。
@@ -179,8 +226,13 @@ def _extract_counterparty(text: str, bracket_tags: List[str]) -> str:
         m = pat.search(text)
         if m:
             name = m.group(1).strip()
-            if 1 < len(name) < 20:
+            if 1 < len(name) < 20 and not _is_counterparty_blocked(name):
                 return name
+
+    # 都道府県企業局・水道局（水道料金など公的機関）
+    govt = _extract_govt_entity(text)
+    if govt:
+        return govt
 
     # 「御中」の直前の行を相手先と見なす
     lines = text.splitlines()
@@ -188,7 +240,7 @@ def _extract_counterparty(text: str, bracket_tags: List[str]) -> str:
         if "御中" in line and i > 0:
             candidate = lines[i - 1].strip()
             candidate = re.sub(r"株式会社|合同会社|有限会社", "", candidate).strip()
-            if 1 < len(candidate) < 20:
+            if 1 < len(candidate) < 20 and not _is_counterparty_blocked(candidate):
                 return candidate
 
     return ""
@@ -197,11 +249,12 @@ def _extract_counterparty(text: str, bracket_tags: List[str]) -> str:
 def _extract_amount(text: str) -> Optional[int]:
     """OCR テキストから金額（円）を抽出する。最大値を返す。"""
     amounts = []
-    for pat in [AMOUNT_PATTERN, AMOUNT_YEN_PATTERN]:
+    for pat in [AMOUNT_PATTERN, AMOUNT_YEN_PATTERN, AMOUNT_LABEL_PATTERN]:
         for m in pat.finditer(text):
             try:
                 val = int(m.group(1).replace(",", ""))
-                amounts.append(val)
+                if val > 0:
+                    amounts.append(val)
             except ValueError:
                 pass
     return max(amounts) if amounts else None
@@ -218,7 +271,11 @@ def _extract_document_name(text: str, category: str) -> str:
         "Insurance": ["保険証券", "保険更新通知"],
         "Medical": ["診療明細書", "領収書", "処方箋"],
         "School": ["成績通知", "通知表"],
-        "Utility": ["使用水量のお知らせ", "電気ご使用量のお知らせ", "ガス使用量のお知らせ"],
+        "Utility": [
+            "水道料金領収証", "水道料金領収書",
+            "水道料金案内", "水道料金のお知らせ", "水道料金促状",
+            "使用水量のお知らせ", "電気ご使用量のお知らせ", "ガス使用量のお知らせ",
+        ],
         "Receipt": ["領収書"],
         "Other": [],
     }
@@ -273,13 +330,20 @@ def parse_rename_fields(
         if doc_from_name:
             document = doc_from_name[:30]
 
+    # --- Payment method: ファイル名から抽出 ---
+    payment_method = ""
+    for keyword, normalized in PAYMENT_METHOD_FROM_FILENAME:
+        if keyword in source_filename:
+            payment_method = normalized
+            break
+
     return {
         "date": date,
         "category": category,
         "document": document,
         "counterparty": counterparty,
         "amount_jpy": amount_jpy,
-        "payment_method": "",
+        "payment_method": payment_method,
     }
 
 
@@ -355,7 +419,10 @@ def apply_patterns(
                 if pat_category and (not updated.get("category") or updated.get("category") == "Other"):
                     updated["category"] = pat_category
                     changed = True
-                if pat_document and not updated.get("document"):
+                # ファイル名スラグ由来（_や数字を含む）ならパターンで上書き可
+                existing_doc = updated.get("document", "")
+                doc_is_slug = bool(re.search(r"[_\-]\d|JPY|現金|領収証_|案内_", existing_doc))
+                if pat_document and (not existing_doc or doc_is_slug):
                     updated["document"] = pat_document
                     changed = True
                 if pat_counterparty and not updated.get("counterparty"):

@@ -74,12 +74,16 @@ def _safe_copy_dest(dest_dir: Path, filename: str) -> Path:
 
 
 def _collect_pdfs() -> list:
-    """renamed/ と auto-approved/ の PDF 一覧（.gitkeep 除外）。"""
-    pdfs = []
+    """renamed/ と auto-approved/ の処理済みファイル一覧（.gitkeep 除外）。PDF・画像を含む。"""
+    _DOC_SUFFIXES = {".pdf", ".jpg", ".jpeg", ".png"}
+    files = []
     for d in (RENAMED_DIR, AUTO_APPROVED_DIR):
         if d.exists():
-            pdfs.extend(f for f in d.glob("*.pdf") if f.name != ".gitkeep")
-    return sorted(pdfs)
+            files.extend(
+                f for f in d.iterdir()
+                if f.is_file() and f.suffix.lower() in _DOC_SUFFIXES and f.name != ".gitkeep"
+            )
+    return sorted(files)
 
 
 def _collect_metadata() -> list:
