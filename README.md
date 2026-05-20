@@ -224,8 +224,8 @@ python scripts/normalize_documents.py
 
 `processing/` は分類・変換・リネームを行う一時領域です。
 
-- **OCR**: 画像・スキャン PDF からテキストを抽出する
-- **PDF 化**: `.png` / `.jpg` / `.jpeg` を PDF に変換する
+- **正規化**: `.jpg` / `.png` / `.jpeg` を単一ページ PDF へ自動変換（`processing/normalized/` に一時保存）
+- **OCR**: 正規化済み PDF からテキストを抽出する（Vision Framework）
 - **リネーム**: `docs/naming-convention.md` の命名規約を適用する（`scripts/rename_documents.py` 参照）
 - **metadata 生成**: `templates/metadata_template.json` に基づき `.json` を作成する
 
@@ -257,6 +257,7 @@ Category 一覧は [`docs/categories.md`](docs/categories.md)、支払手段は 
 | スクリプト | 役割 | 実行タイミング |
 |---|---|---|
 | `normalize_documents.py` | inbox のファイル一覧・文字化け検出 | 月次処理開始時 |
+| `normalize_images.py` | .jpg/.png を PDF へ変換（process_inbox から自動呼び出し） | process_inbox 内部 |
 | `process_inbox.py` | 分析・rename 候補・レポート生成 | normalize の次 |
 | `rename_documents.py` | 命名規約のファイル名生成・検証 | rename 時に参照 |
 | `generate_metadata.py` | metadata scaffold 生成 | renamed/ 配置後 |

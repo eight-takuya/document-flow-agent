@@ -20,6 +20,12 @@ Claude Cowork が月次運用を行う際の手順書として使用してくだ
 ```
 PDF / 画像ファイル
        |
+       | 画像の場合: scripts/normalize_images.py（Pillow）
+       |   .jpg/.jpeg/.png → processing/normalized/ に単一ページ PDF を生成
+       |   元画像は変更しない
+       ↓
+  正規化済み PDF（または元 PDF）
+       |
        | sips（macOS 標準）で1ページ目を JPEG に変換
        ↓
   JPEG 画像
@@ -58,6 +64,9 @@ PDF / 画像ファイル
         | python scripts/normalize_documents.py
         | → ファイル一覧・文字化け検出・リネームヒント表示
         |
+        |
+        | 画像ファイル（.jpg/.png）は自動的に PDF へ正規化
+        | → processing/normalized/ に一時保存（OCR 後は削除不要）
         ↓
 [Dry-run]  ← デフォルト。必ず先に実行する
   python scripts/process_inbox.py --dry-run
@@ -222,6 +231,7 @@ PDF / 画像ファイル
 |---|---|
 | `inbox/` | `archive_input.py --apply` 実行後は空（次のスキャン分が来るまで） |
 | `archive/original-input/YYYYMM/` | 月別アーカイブ済み原本（累積） |
+| `processing/normalized/` | 一時的な正規化済み PDF（画像→PDF 変換結果。次のスキャンまで保持可） |
 | `processing/review-required/` | レポート JSON のみ（PDF は移動しない） |
 | `processing/renamed/` | 処理中 PDF のみ（metadata 生成後は metadata-ready へ） |
 | `processing/metadata-ready/` | PDF + .metadata.json のペア |

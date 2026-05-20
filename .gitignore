@@ -16,6 +16,10 @@ processing/*
 !processing/auto-approved/
 !processing/metadata-ready/
 !processing/ocr-error/
+!processing/normalized/
+
+processing/normalized/*
+!processing/normalized/.gitkeep
 
 processing/review-required/*
 !processing/review-required/.gitkeep

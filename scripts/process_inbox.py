@@ -37,6 +37,7 @@ AUTO_APPROVED_DIR = PROCESSING_DIR / "auto-approved"
 METADATA_READY_DIR = PROCESSING_DIR / "metadata-ready"
 REVIEW_DIR = PROCESSING_DIR / "review-required"
 OCR_ERROR_DIR = PROCESSING_DIR / "ocr-error"
+NORMALIZED_DIR = PROCESSING_DIR / "normalized"
 LOGS_DIR = REPO_ROOT / "logs"
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -58,6 +59,7 @@ from ocr_extract import (
     is_auto_approvable,
 )
 from ocr_utils import extract_text_with_engine
+from normalize_images import normalize_image, ACCEPTED_IMAGE_SUFFIXES
 
 MAX_STEM_LENGTH = 80
 DATE_PREFIX_PATTERN = re.compile(r"^\d{8}[_\-\s]?")
@@ -120,11 +122,20 @@ def analyze_file(path: Path, use_ocr: bool, patterns: Optional[list] = None) -> 
         warnings.append(f"ファイル名が長すぎる ({len(Path(name).stem)} 文字)")
     if not date:
         warnings.append("日付が読み取れない")
-    if kind == "IMAGE":
-        warnings.append("画像ファイル — PDF 化が必要")
 
     needs_ocr_review = garbled
     needs_review = bool(warnings)
+
+    # --- 画像の場合は PDF へ正規化 ---
+    normalized_path: Optional[Path] = None
+    original_extension = path.suffix.lower()
+    if kind == "IMAGE":
+        normalized_path = normalize_image(path, NORMALIZED_DIR)
+        if normalized_path:
+            print(f"  [NORM]  {name} → {normalized_path.name}")
+
+    # OCR は正規化済み PDF (あれば) で実行する
+    ocr_input_path = normalized_path if normalized_path else path
 
     # --- OCR ---
     ocr_text = ""
@@ -137,7 +148,7 @@ def analyze_file(path: Path, use_ocr: bool, patterns: Optional[list] = None) -> 
     auto_approved = False
 
     if use_ocr and kind in ("PDF", "IMAGE"):
-        result = extract_text_with_engine(path)
+        result = extract_text_with_engine(ocr_input_path)
         ocr_text = result.text
         ocr_engine = result.engine
         if ocr_text:
@@ -194,6 +205,8 @@ def analyze_file(path: Path, use_ocr: bool, patterns: Optional[list] = None) -> 
         "pattern_matched": pattern_matched,
         "auto_approved": auto_approved,
         "warnings": warnings,
+        "normalized_path": normalized_path,
+        "original_extension": original_extension,
     }
 
 
@@ -922,11 +935,15 @@ def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
             conf_pct = f"{item['confidence']:.0%}"
             engine = item.get("ocr_engine", "none")
             if apply:
-                dest_path = copy_to_auto_approved(item["path"], rename)
+                copy_src = item.get("normalized_path") or item["path"]
+                dest_path = copy_to_auto_approved(copy_src, rename)
                 dest_rel = dest_path.relative_to(REPO_ROOT)
                 metadata = generate_metadata(dest_path.name, source_filename=item["name"])
                 metadata["status"] = "auto-approved"
                 metadata["confidence"] = item["confidence"]
+                if item.get("normalized_path"):
+                    metadata["original_extension"] = item["original_extension"]
+                    metadata["normalized_pdf"] = True
                 meta_path = save_metadata(metadata, METADATA_READY_DIR)
                 meta_rel = meta_path.relative_to(REPO_ROOT)
                 auto_copied_count += 1
@@ -955,10 +972,14 @@ def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
         ocr_info = " (OCR推定)" if item.get("ocr_rename_candidate") else " (filename推定)"
 
         if apply:
-            dest_path = copy_to_renamed(item["path"], rename)
+            copy_src = item.get("normalized_path") or item["path"]
+            dest_path = copy_to_renamed(copy_src, rename)
             dest_rel = dest_path.relative_to(REPO_ROOT)
             metadata = generate_metadata(dest_path.name, source_filename=item["name"])
             metadata["status"] = "renamed"
+            if item.get("normalized_path"):
+                metadata["original_extension"] = item["original_extension"]
+                metadata["normalized_pdf"] = True
             meta_path = save_metadata(metadata, METADATA_READY_DIR)
             meta_rel = meta_path.relative_to(REPO_ROOT)
             copied_count += 1

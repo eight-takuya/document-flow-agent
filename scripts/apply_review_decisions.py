@@ -29,10 +29,12 @@ METADATA_DIR = ROOT / "processing" / "metadata-ready"
 REVIEW_DIR = ROOT / "processing" / "review-required"
 APPLIED_DIR = REVIEW_DIR / "applied"
 DECISIONS_FILE = REVIEW_DIR / "review-decisions.json"
+NORMALIZED_DIR = ROOT / "processing" / "normalized"
 LOGS_DIR = ROOT / "logs"
 
 sys.path.insert(0, str(Path(__file__).parent))
 from generate_metadata import generate_metadata, save_metadata
+from normalize_images import normalize_image, ACCEPTED_IMAGE_SUFFIXES
 
 
 def _setup_logging(timestamp: str) -> logging.Logger:
@@ -98,9 +100,21 @@ def _apply_rename(item: dict, logger: logging.Logger) -> bool:
         logger.error("RENAME 失敗 — inbox にファイルが見つかりません: %s", source_name)
         return False
 
+    # 画像ファイルは正規化済み PDF を使用する
+    is_image = source_path.suffix.lower() in ACCEPTED_IMAGE_SUFFIXES
+    if is_image:
+        normalized = normalize_image(source_path, NORMALIZED_DIR)
+        if normalized:
+            source_path = normalized
+            logger.info("NORM       %s → %s (normalized PDF)", source_name, normalized.name)
+        else:
+            logger.warning("NORM 失敗 — 元の画像ファイルを使用します: %s", source_name)
+
     safe_name = re.sub(r'[<>:"/\\|?*]', "_", approved_name)
-    _valid_exts = {".pdf", ".jpg", ".jpeg", ".png"}
-    if Path(safe_name).suffix.lower() not in _valid_exts:
+    # 画像ソースは必ず .pdf 拡張子にする（正規化済み PDF をコピーするため）
+    if is_image:
+        safe_name = Path(safe_name).stem + ".pdf"
+    elif Path(safe_name).suffix.lower() not in {".pdf", ".jpg", ".jpeg", ".png"}:
         safe_name += ".pdf"
 
     RENAMED_DIR.mkdir(parents=True, exist_ok=True)
@@ -122,6 +136,9 @@ def _apply_rename(item: dict, logger: logging.Logger) -> bool:
         metadata["status"] = "renamed"
         if notes:
             metadata["notes"] = notes
+        if is_image:
+            metadata["original_extension"] = Path(source_name).suffix.lower()
+            metadata["normalized_pdf"] = True
         saved = save_metadata(metadata, METADATA_DIR)
         logger.info("METADATA   %s", saved.name)
     except Exception as e:
