@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "description": "キーワード→Category/Document/Counterparty 推定パターン。process_inbox.py が読み込む。新しいパターンを追記して運用改善できる。",
   "patterns": [
     { "keywords": ["業務完了通知書", "業務完了"], "category": "Work", "document": "業務完了通知書" },
@@ -19,12 +19,26 @@
     { "keywords": ["水道料金案内", "水道料金のお知らせ", "案内_水道料金", "水道料金３月", "水道料金3月", "水道料金"], "category": "Utility", "document": "水道料金案内" },
     { "keywords": ["電気料金", "電気ご使用量"], "category": "Utility", "document": "電気料金案内" },
     { "keywords": ["ガス料金", "ガス使用量"], "category": "Utility", "document": "ガス料金案内" },
-    { "keywords": ["使用水量", "下水道使用料"], "category": "Utility", "document": "水道使用量のお知らせ" },
+    { "keywords": ["使用水量のお知らせ", "使用水量", "下水道使用料"], "category": "Utility", "document": "水道使用量のお知らせ" },
     { "keywords": ["水道", "電気", "ガス"], "category": "Utility", "document": "使用量のお知らせ" },
     { "keywords": ["領収証"], "category": "Receipt", "document": "領収証" },
     { "keywords": ["保険証", "保険証券", "被保険者"], "category": "Insurance", "document": "保険証" },
     { "keywords": ["発注書"], "category": "Contract", "document": "発注書" },
     { "keywords": ["納品書"], "category": "Contract", "document": "納品書" },
-    { "keywords": ["契約書"], "category": "Contract", "document": "契約書" }
+    { "keywords": ["契約書"], "category": "Contract", "document": "契約書" },
+
+    { "keywords": ["口座振替開始通知", "健康保険・厚生年金保険口座振替"], "category": "Insurance", "document": "口座振替開始通知書", "counterparty": "日本年金機構" },
+    { "keywords": ["保険料納入告知額", "保険料納入告知書", "保険料納入告知"], "category": "Insurance", "document": "保険料納入告知額通知", "counterparty": "日本年金機構" },
+    { "keywords": ["共済加入証書", "共済加入"], "category": "Insurance", "document": "共済加入証書", "counterparty": "千葉県民共済" },
+    { "keywords": ["SBIベネフィット", "企業型DC", "確定拠出年金掛金"], "category": "Insurance", "document": "確定拠出年金掛金明細" },
+    { "keywords": ["中小企業退職金制度", "退職金制度支援"], "category": "Other", "document": "退職金制度案内" },
+
+    { "keywords": ["講師派遣について（依頼）", "プロジェクト・スタディ", "探究ゼミ"], "category": "School", "document": "講師派遣依頼書" },
+    { "keywords": ["探究ゼミ実施要項"], "category": "School", "document": "探究ゼミ実施要項" },
+    { "keywords": ["職業講演会"], "category": "School", "document": "職業講演会講師依頼書" },
+    { "keywords": ["Teamを用意", "Teamsにログイン", "Teamには参加"], "category": "School", "document": "Teams接続情報" },
+
+    { "keywords": ["青少年補導員連絡協議会", "補導員連絡協議会"], "category": "Other", "document": "補導員連絡協議会案内" },
+    { "keywords": ["少年警察ボランティア", "少年醬察ボランティア"], "category": "Other", "document": "警察ボランティア協議会案内" }
   ]
 }

@@ -28,9 +28,13 @@ CATEGORY_KEYWORDS: List[tuple] = [
     ("Government", ["履歴事項全部証明書", "証明書", "変更通知書", "通告制度",
                     "登記", "行政", "許可証", "所在名称変更", "適用事業所"]),
     ("Tax",        ["住民税", "所得税", "固定資産税", "課税通知", "確定申告", "納税通知"]),
-    ("Insurance",  ["保険証", "保険", "被保険者"]),
+    # Insurance: 社会保険・生命保険・共済を含む。「保険料」は確認票・告知書で多用するため追加
+    ("Insurance",  ["保険証", "保険料納入告知", "被保険者", "共済加入", "健康保険・厚生年金",
+                    "口座振替開始通知", "年金事務所", "日本年金機構"]),
     ("Medical",    ["診療明細書", "診療", "処方箋", "クリニック", "病院", "医療費"]),
-    ("School",     ["成績", "通知表", "学校", "入学", "授業料"]),
+    # School: 探究ゼミ・講師派遣・職業講演会を追加
+    ("School",     ["成績", "通知表", "学校", "入学", "授業料",
+                    "探究ゼミ", "講師派遣", "職業講演会", "浦安高等学校", "浦安中学校"]),
     ("Utility",    ["使用水量", "水道料金", "電気料金", "ガス料金", "通信費", "下水道"]),
     ("Receipt",    ["領収書", "レシート"]),
     ("Expense",    ["会食", "交通費", "宿泊費"]),
@@ -56,6 +60,8 @@ DATE_PATTERNS = [
 
 AMOUNT_PATTERN = re.compile(r"(\d{1,3}(?:,\d{3})*)\s*円")
 AMOUNT_YEN_PATTERN = re.compile(r"¥\s*(\d{1,3}(?:,\d{3})*)")
+# OCR が「,」を「.」と誤認識した場合の補足パターン（例: ¥232.814円 → 232814）
+AMOUNT_YEN_PERIOD_PATTERN = re.compile(r"¥\s*(\d{1,3})\.(\d{3})\s*円")
 # 「金額」ラベル直後の数値（郵便局払込控などで「円」が別行の場合）
 AMOUNT_LABEL_PATTERN = re.compile(r"金額\s*\n\s*(\d{1,3}(?:,\d{3})*)")
 
@@ -76,6 +82,8 @@ _GOVT_ENTITY_PATTERNS = [
 COUNTERPARTY_BLOCKLIST = [
     "登録商標", "QRコード", "コピーライト", "copyright", "Copyright",
     "無断複製", "無断転載", "All Rights", "registered",
+    "会社法人等番号",  # 履歴事項全部証明書でフィールドラベルが誤検知される
+    "代表取締役",      # 役職名そのものは取引先ではない
 ]
 
 # ファイル名に含まれる支払手段キーワード → 正規化名
@@ -249,6 +257,14 @@ def _extract_counterparty(text: str, bracket_tags: List[str]) -> str:
 def _extract_amount(text: str) -> Optional[int]:
     """OCR テキストから金額（円）を抽出する。最大値を返す。"""
     amounts = []
+    # OCR で「,」→「.」誤認識のパターンを最初にチェック（例: ¥232.814円 → 232814）
+    for m in AMOUNT_YEN_PERIOD_PATTERN.finditer(text):
+        try:
+            val = int(m.group(1) + m.group(2))  # 上位3桁 + 下位3桁を結合
+            if val > 0:
+                amounts.append(val)
+        except ValueError:
+            pass
     for pat in [AMOUNT_PATTERN, AMOUNT_YEN_PATTERN, AMOUNT_LABEL_PATTERN]:
         for m in pat.finditer(text):
             try:
@@ -268,9 +284,11 @@ def _extract_document_name(text: str, category: str) -> str:
         "Government": ["履歴事項全部証明書", "変更通知書", "適用事業所所在名称変更通知書",
                        "交通反則通告制度案内"],
         "Tax": ["住民税通知書", "課税通知書", "納税通知書"],
-        "Insurance": ["保険証券", "保険更新通知"],
+        "Insurance": ["保険証券", "保険更新通知", "保険料納入告知額", "口座振替開始通知書",
+                      "共済加入証書", "保険料納入告知書"],
         "Medical": ["診療明細書", "領収書", "処方箋"],
-        "School": ["成績通知", "通知表"],
+        "School": ["成績通知", "通知表", "探究ゼミ実施要項", "講師派遣依頼書",
+                   "職業講演会", "Teams接続情報"],
         "Utility": [
             "水道料金領収証", "水道料金領収書",
             "水道料金案内", "水道料金のお知らせ", "水道料金促状",
@@ -416,16 +434,53 @@ def apply_patterns(
                 pat_counterparty = pattern.get("counterparty", "")
 
                 changed = False
-                if pat_category and (not updated.get("category") or updated.get("category") == "Other"):
-                    updated["category"] = pat_category
-                    changed = True
-                # ファイル名スラグ由来（_や数字を含む）ならパターンで上書き可
+
+                # ファイル名でキーワードが見つかった場合は文書種別の強いシグナル。
+                # 例: 「講師派遣について（依頼）」がファイル名に含まれる →
+                #       OCR 本文が探究ゼミ実施要項に言及していても「講師派遣依頼書」を優先
+                # 誤上書き防止のため、5文字以上のキーワードに限定
+                keyword_in_filename = (keyword in filename) and len(keyword) >= 5
+
+                # --- Category ---
+                # OCR 本文でキーワードが見つかり、かつキーワードが5文字以上の場合は
+                # parse_rename_fields の暫定分類よりパターンを優先して上書きする。
+                # （例: 水道料金通知に「請求書に記載の…」という記述が含まれ Contract に
+                #   誤分類された場合でも、「使用水量のお知らせ」9文字で Utility に訂正できる）
+                # 短いキーワード（3〜4文字: 領収証・請求書など）は誤上書きを避けるため除外。
+                if pat_category:
+                    current_cat = updated.get("category", "")
+                    keyword_in_ocr = keyword in text  # ファイル名ではなく OCR 本文での一致
+                    can_override_cat = keyword_in_ocr and len(keyword) >= 5
+                    if (not current_cat
+                            or current_cat == "Other"
+                            or can_override_cat):
+                        if current_cat != pat_category:
+                            updated["category"] = pat_category
+                            changed = True
+
+                # --- Document ---
+                # スラグ（ファイル名由来の仮称・数字のみ・角括弧表記・
+                #         マイナス記号付き住所・20文字超の長いファイル名断片）か
+                # カテゴリが変わった場合、またはキーワードがファイル名に直接含まれる場合は上書き可
                 existing_doc = updated.get("document", "")
-                doc_is_slug = bool(re.search(r"[_\-]\d|JPY|現金|領収証_|案内_", existing_doc))
-                if pat_document and (not existing_doc or doc_is_slug):
+                doc_is_slug = bool(re.search(
+                    r"[_\-]\d|JPY|現金|領収証_|案内_|^\d+$|^〈|[−]\d|\d[−]",
+                    existing_doc
+                )) or len(existing_doc) > 20
+                if pat_document and (not existing_doc or doc_is_slug or changed
+                                     or keyword_in_filename):
                     updated["document"] = pat_document
                     changed = True
-                if pat_counterparty and not updated.get("counterparty"):
+
+                # --- Counterparty ---
+                # 空の場合か、短い ASCII のみ文字列（OCR ゴミ）の場合に上書き
+                existing_cp = updated.get("counterparty", "")
+                cp_is_ocr_garbage = bool(
+                    existing_cp
+                    and re.match(r'^[A-Za-z0-9]+$', existing_cp)
+                    and len(existing_cp) < 8
+                )
+                if pat_counterparty and (not existing_cp or cp_is_ocr_garbage):
                     updated["counterparty"] = pat_counterparty
                     changed = True
 
