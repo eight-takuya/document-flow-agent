@@ -25,6 +25,7 @@ _SCRIPTS_DIR = Path(__file__).parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 from tag_utils import generate_tags, merge_tags  # noqa: E402
+from summary_utils import generate_summary       # noqa: E402
 
 REPO_ROOT = Path(__file__).parent.parent
 METADATA_READY_DIR = REPO_ROOT / "processing" / "metadata-ready"
@@ -121,7 +122,7 @@ def calc_discard_date(issue_date: str, category: str) -> str:
         return ""
 
 
-def validate_metadata(data: dict, filepath: Path) -> Tuple[List[Issue], dict]:
+def validate_metadata(data: dict, filepath: Path, summary_refresh: bool = False) -> Tuple[List[Issue], dict]:
     """
     metadata dict を検証し (issues, fixed_data) を返す。
     fixed_data は --fix 用の修正済みコピー（修正がない場合は元の dict をそのまま）。
@@ -301,6 +302,19 @@ def validate_metadata(data: dict, filepath: Path) -> Tuple[List[Issue], dict]:
             fixable=True, fix_value=merged,
         ))
 
+    # --- summary（自動補完）---
+    existing_summary: str = str(fixed.get("summary") or "").strip()
+    if summary_refresh or not existing_summary:
+        new_summary = generate_summary(fixed)
+        if new_summary and new_summary != existing_summary:
+            action = "再生成（--summary-refresh）" if summary_refresh and existing_summary else "自動補完"
+            fixed["summary"] = new_summary
+            issues.append(Issue(
+                Severity.INFO, "summary",
+                f"summary を{action}: 「{new_summary[:40]}{'…' if len(new_summary) > 40 else ''}」",
+                fixable=True, fix_value=new_summary,
+            ))
+
     # --- schema_version の付与（最後に確認）---
     if "schema_version" not in fixed:
         fixed["schema_version"] = "v1"
@@ -320,6 +334,7 @@ def run_validation(
     target_dir: Path = METADATA_READY_DIR,
     fix: bool = False,
     single_file: Optional[Path] = None,
+    summary_refresh: bool = False,
 ) -> dict:
     """全 metadata ファイルを検証し、結果サマリを返す。"""
 
@@ -341,6 +356,12 @@ def run_validation(
     tag_counter: Counter = Counter()
     files_without_tags = 0
     representative_new_tags: List[str] = []
+    # summary 統計
+    summary_added = 0
+    summary_refreshed = 0
+    summary_missing = 0
+    summary_category_count: Counter = Counter()
+    summary_examples: List[str] = []
 
     for f in files:
         try:
@@ -349,7 +370,7 @@ def run_validation(
             print(f"  [ERROR] JSON 解析エラー: {f.name} — {e}")
             continue
 
-        issues, fixed_data = validate_metadata(data, f)
+        issues, fixed_data = validate_metadata(data, f, summary_refresh=summary_refresh)
 
         errors   = [i for i in issues if i.severity == Severity.ERROR]
         warnings = [i for i in issues if i.severity == Severity.WARNING]
@@ -371,6 +392,25 @@ def run_validation(
             if t not in representative_new_tags:
                 representative_new_tags.append(t)
 
+        # summary 統計
+        orig_summary = str(data.get("summary") or "").strip()
+        new_summary  = str(fixed_data.get("summary") or "").strip()
+        cat = str(data.get("category") or "Other")
+        if not new_summary:
+            summary_missing += 1
+        elif not orig_summary and new_summary:
+            summary_added += 1
+            summary_category_count[cat] += 1
+            if len(summary_examples) < 5:
+                summary_examples.append(new_summary)
+        elif orig_summary and new_summary != orig_summary:
+            summary_refreshed += 1
+            summary_category_count[cat] += 1
+            if len(summary_examples) < 5:
+                summary_examples.append(new_summary)
+        else:
+            summary_category_count[cat] += 1
+
         result_entry = {
             "file": f.name,
             "errors": len(errors),
@@ -382,6 +422,8 @@ def run_validation(
             ],
             "fixed": False,
             "tags_added": added_tags,
+            "summary_added": not orig_summary and bool(new_summary),
+            "summary_refreshed": bool(orig_summary and new_summary != orig_summary),
         }
 
         if issues:
@@ -402,7 +444,7 @@ def run_validation(
         if issues:
             print()
 
-    summary = {
+    result_summary = {
         "total_files": len(files),
         "files_with_errors": sum(1 for r in results if r["errors"] > 0),
         "files_with_warnings": sum(1 for r in results if r["warnings"] > 0),
@@ -416,9 +458,15 @@ def run_validation(
         "tag_frequency": dict(tag_counter.most_common(20)),
         "files_without_tags": files_without_tags,
         "representative_new_tags": representative_new_tags[:20],
+        # summary 統計
+        "summary_added": summary_added,
+        "summary_refreshed": summary_refreshed,
+        "summary_missing": summary_missing,
+        "summary_category_count": dict(summary_category_count.most_common()),
+        "summary_examples": summary_examples,
     }
 
-    return summary
+    return result_summary
 
 
 def write_report(summary: dict, timestamp: str) -> None:
@@ -442,8 +490,6 @@ def write_report(summary: dict, timestamp: str) -> None:
         f"| 自動修正済み | {summary['fixed_count']} |",
         f"| ERROR 総数 | {summary['total_errors']} |",
         f"| WARNING 総数 | {summary['total_warnings']} |",
-        "",
-        "## 問題ファイル一覧",
         "",
     ]
 
@@ -477,6 +523,38 @@ def write_report(summary: dict, timestamp: str) -> None:
             ", ".join(f"`{t}`" for t in new_tags),
             "",
         ]
+
+    # summary 統計セクション
+    lines += [
+        "## Summary 自動生成サマリー",
+        "",
+        f"| 項目 | 数 |",
+        f"|---|---|",
+        f"| summary 新規追加件数 | {summary.get('summary_added', 0)} |",
+        f"| summary 再生成件数（--summary-refresh） | {summary.get('summary_refreshed', 0)} |",
+        f"| summary 未生成件数 | {summary.get('summary_missing', 0)} |",
+        "",
+    ]
+    cat_count = summary.get("summary_category_count", {})
+    if cat_count:
+        lines += [
+            "### category 別 summary 生成件数",
+            "",
+            "| category | 件数 |",
+            "|---|---|",
+        ]
+        for cat, cnt in cat_count.items():
+            lines.append(f"| {cat} | {cnt} |")
+        lines.append("")
+    examples = summary.get("summary_examples", [])
+    if examples:
+        lines += [
+            "### 代表 summary 例",
+            "",
+        ]
+        for ex in examples:
+            lines.append(f"- {ex}")
+        lines.append("")
 
     lines += [
         "## 問題ファイル一覧",
@@ -518,15 +596,18 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  python scripts/validate_metadata.py                  # 全件検証（変更なし）
-  python scripts/validate_metadata.py --fix            # 自動修正可能な問題を修正
-  python scripts/validate_metadata.py --report         # JSON/MD レポートを出力
-  python scripts/validate_metadata.py --fix --report   # 修正 + レポート
-  python scripts/validate_metadata.py path/to.json     # 単一ファイル検証
+  python scripts/validate_metadata.py                           # 全件検証（変更なし）
+  python scripts/validate_metadata.py --fix                     # 自動修正可能な問題を修正
+  python scripts/validate_metadata.py --fix --summary-refresh   # summary も再生成
+  python scripts/validate_metadata.py --report                  # JSON/MD レポートを出力
+  python scripts/validate_metadata.py --fix --report            # 修正 + レポート
+  python scripts/validate_metadata.py path/to.json              # 単一ファイル検証
         """,
     )
     parser.add_argument("file", nargs="?", help="単一ファイルを検証")
     parser.add_argument("--fix", action="store_true", help="自動修正可能な問題を修正する")
+    parser.add_argument("--summary-refresh", action="store_true",
+                        help="既存 summary があっても再生成して上書きする（--fix と併用）")
     parser.add_argument("--report", action="store_true", help="JSON/MD レポートを出力する")
     parser.add_argument("--dir", type=Path, default=METADATA_READY_DIR,
                         help=f"検証対象ディレクトリ（デフォルト: {METADATA_READY_DIR}）")
@@ -534,14 +615,19 @@ examples:
 
     single_file = Path(args.file) if args.file else None
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    summary_refresh = getattr(args, "summary_refresh", False)
 
-    print(f"=== validate_metadata.py  {'fix=ON' if args.fix else 'dry-run'}  {timestamp} ===")
+    fix_label = "fix=ON" if args.fix else "dry-run"
+    if summary_refresh:
+        fix_label += " + summary-refresh"
+    print(f"=== validate_metadata.py  {fix_label}  {timestamp} ===")
     print()
 
     summary = run_validation(
         target_dir=args.dir,
         fix=args.fix,
         single_file=single_file,
+        summary_refresh=summary_refresh,
     )
 
     if not summary:
@@ -566,6 +652,12 @@ examples:
     new_tags = summary.get("representative_new_tags", [])
     if new_tags:
         print(f"  新規追加タグ例   : {', '.join(new_tags[:8])}")
+    print(f"  summary 追加件数 : {summary.get('summary_added', 0)}")
+    print(f"  summary 再生成   : {summary.get('summary_refreshed', 0)}")
+    print(f"  summary 未生成   : {summary.get('summary_missing', 0)}")
+    examples = summary.get("summary_examples", [])
+    if examples:
+        print(f"  summary 例       : {examples[0][:60]}{'…' if len(examples[0]) > 60 else ''}")
     print()
 
     if summary["total_errors"] == 0 and summary["total_warnings"] == 0:

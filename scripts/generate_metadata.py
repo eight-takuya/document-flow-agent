@@ -19,7 +19,8 @@ from typing import Optional
 _SCRIPTS_DIR = Path(__file__).parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
-from tag_utils import generate_tags, merge_tags  # noqa: E402
+from tag_utils import generate_tags, merge_tags    # noqa: E402
+from summary_utils import generate_summary         # noqa: E402
 
 PROCESSING_DIR = Path(__file__).parent.parent / "processing"
 RENAMED_DIR = PROCESSING_DIR / "renamed"
@@ -195,6 +196,7 @@ def generate_metadata(
     metadata["notion_registered"] = False
     metadata["dropbox_exported"] = False
     metadata["notes"] = ""
+    metadata["summary"] = generate_summary(metadata)
     metadata["created_at"] = now
     metadata["updated_at"] = now
     # --- split PDF フィールド ---

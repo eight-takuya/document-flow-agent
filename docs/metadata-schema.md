@@ -57,6 +57,7 @@ metadata は以下の目的で使用します：
 | `notion_registered` | `boolean` | Notion 登録済みか |
 | `dropbox_exported` | `boolean` | Dropbox 転送済みか |
 | `notes` | `string` | 補足メモ（自由記述） |
+| `summary` | `string` | 文書サマリー（1〜2文、日本語、80〜160文字程度）。後述の Summary 仕様を参照 |
 | `updated_at` | `string` | 最終更新日時 `YYYY-MM-DD HH:MM:SS` |
 
 ### 分割 PDF 専用フィールド（split_pdf が true の場合）
@@ -251,6 +252,51 @@ category ごとの法定・推奨保存期間。`discard_date = issue_date + ret
 
 ---
 
+## Summary 仕様
+
+### ルール
+
+- 型: `string`
+- 日本語・1〜2文、80〜160文字程度
+- 空でも可（`""`）だが、可能な限り自動生成
+- `validate_metadata.py --fix` / `generate_metadata.py` が自動補完
+- **既存 summary は原則保持**（`--summary-refresh` で再生成可能）
+- Notion 連携・自然言語検索・RAG 検索に使用
+- LLM API は使用しない（metadata フィールドのテンプレート埋め込みで生成）
+
+### 自動生成ロジック（scripts/summary_utils.py）
+
+category 別テンプレートで生成。使用フィールド：`category` / `document` / `counterparty` / `issue_date` / `amount_jpy` / `payment_method`
+
+| category | テンプレート例 |
+|---|---|
+| Utility | `{counterparty}による{document}。{date}発行、金額は{amount}、支払方法は{payment}。` |
+| Receipt | `{counterparty}の{document}。{date}発行、金額は{amount}、支払方法は{payment}。` |
+| Finance | `{counterparty}に関する{document}。{date}発行、金融関連書類として保管。` |
+| Insurance | `{counterparty}に関する{document}。{date}発行、保険関連書類として保管。` |
+| School | `{counterparty}に関する{document}。{date}発行、学校・教育関連書類として保管。` |
+| Government | `{counterparty}による{document}。{date}発行、行政関連書類として保管。` |
+| Medical | `{counterparty}による{document}。{date}発行、医療関連書類として保管。` |
+| Work / Contract | `{counterparty}に関する{document}。{date}発行、{category}関連書類として保管。` |
+| Other | `{document}。{date}発行。分類未確定のため内容確認を推奨。` |
+
+### サンプル
+
+```json
+{ "summary": "千葉県企業局による水道料金領収証。2025年5月20日発行、金額は14,762円、支払方法は現金。" }
+{ "summary": "日本年金機構に関する保険料納入告知額。2026年4月20日発行、金額は232,814円、保険関連書類として保管。" }
+{ "summary": "B8Eによる履歴事項全部証明書。2026年4月7日発行、行政関連書類として保管。" }
+```
+
+### 再生成
+
+```bash
+python3 scripts/validate_metadata.py --fix                    # summary が空の場合のみ補完
+python3 scripts/validate_metadata.py --fix --summary-refresh  # 既存 summary も再生成
+```
+
+---
+
 ## Tags 仕様
 
 ### ルール
@@ -319,3 +365,4 @@ category ごとの法定・推奨保存期間。`discard_date = issue_date + ret
 |---|---|---|
 | 2026-05-23 | v1 | 初版。Finance カテゴリ追加、status enum 整備、document-unknown 分離、discard_date 自動計算 |
 | 2026-05-23 | v1.1 | tags 自動生成機能追加（scripts/tag_utils.py）、Tags 仕様セクション追加 |
+| 2026-05-23 | v1.2 | summary 自動生成機能追加（scripts/summary_utils.py）、Summary 仕様セクション追加 |

@@ -350,6 +350,27 @@ python scripts/validate_metadata.py --fix   # 既存 metadata の tags を不足
 
 ---
 
+## Summary 自動生成
+
+metadata 生成時・検証時に、文書内容を **1〜2文の日本語サマリー** として自動付与します。
+
+```
+"summary": "千葉県企業局による水道料金領収証。2025年5月20日発行、金額は14,762円、支払方法は現金。"
+```
+
+```bash
+python scripts/generate_metadata.py         # 新規生成時に summary 初期付与
+python scripts/validate_metadata.py --fix   # 既存 metadata の summary を空欄のみ補完
+python scripts/validate_metadata.py --fix --summary-refresh  # 全件 summary 再生成（上書き）
+```
+
+- LLM API 不使用（category別テンプレートで生成）
+- 既存 summary は原則保持（`--summary-refresh` で再生成）
+- Notion 連携・自然言語検索・RAG 検索に対応した粒度
+- summary 定義: `scripts/summary_utils.py` / `docs/metadata-schema.md`
+
+---
+
 ## スクリプト一覧
 
 | スクリプト | 役割 | 実行タイミング |
@@ -359,9 +380,10 @@ python scripts/validate_metadata.py --fix   # 既存 metadata の tags を不足
 | `split_receipts.py` | 複数ページ PDF を 1ページ=1PDF に分割（process_inbox から自動呼び出し） | process_inbox 内部 |
 | `process_inbox.py` | 分析・rename 候補・レポート生成 | normalize の次 |
 | `rename_documents.py` | 命名規約のファイル名生成・検証 | rename 時に参照 |
-| `generate_metadata.py` | metadata scaffold 生成（schema v1 / tags自動付与） | renamed/ 配置後 |
+| `generate_metadata.py` | metadata scaffold 生成（schema v1 / tags・summary自動付与） | renamed/ 配置後 |
 | `tag_utils.py` | metadata tags 自動生成ユーティリティ（generate_metadata / validate_metadata から呼ばれる） | 内部モジュール |
-| `validate_metadata.py` | metadata schema v1 検証・自動修正・tags補完・レポート出力 | metadata 補完後 |
+| `summary_utils.py` | metadata summary 自動生成ユーティリティ（テンプレートベース・LLM不使用） | 内部モジュール |
+| `validate_metadata.py` | metadata schema v1 検証・自動修正・tags/summary補完・レポート出力 | metadata 補完後 |
 | `review_server.py` | review-report HTML 表示・保存用ローカルサーバー | review-required 確認時 |
 | `apply_review_decisions.py` | review-decisions.json を処理して rename/discard/skip を実行 | review HTML 確認後 |
 | `check_export_ready.py` | export 可能か判定（review 残・renamed 有無・metadata 対応） | export 前 |

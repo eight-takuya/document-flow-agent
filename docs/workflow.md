@@ -130,10 +130,12 @@ PDF / 画像ファイル
   - counterparty（あれば）
   - amount_jpy / payment_method（あれば）
   - discard_date（issue_date + retention から自動計算）
-  python scripts/validate_metadata.py --fix    # 自動修正（フィールド名移行・discard_date 計算・tags 自動補完）
+  python scripts/validate_metadata.py --fix    # 自動修正（フィールド名移行・discard_date 計算・tags/summary 自動補完）
+  python scripts/validate_metadata.py --fix --summary-refresh  # summary も再生成（既存上書き）
   python scripts/validate_metadata.py --report # 検証レポートを processing/metadata-reports/ へ出力
-  スキーマ定義: docs/metadata-schema.md
+  スキーマ定義: docs/metadata-schema.md（v1.2）
   tags 生成ルール: scripts/tag_utils.py
+  summary 生成ルール: scripts/summary_utils.py
         |
         | 人間による最終確認（docs/export-rules.md の条件を満たしたか確認）
         ↓
@@ -225,6 +227,7 @@ PDF / 画像ファイル
         → ERROR が 0 件になるまで補完を続ける
         → WARNING は推奨値外の document など（許容だが Notion 連携精度低下）
         → tags 追加件数・tag TOP5・tags なし件数がサマリーに表示される
+        → summary 追加件数・category別件数・代表例5件もレポートに表示される
 
 [ ] 9.  python scripts/check_export_ready.py
         → Export ready: YES になることを確認
@@ -288,3 +291,4 @@ PDF / 画像ファイル
 | 2026-05-17 | 初期作成 |
 | 2026-05-23 | metadata schema v1 対応（Metadata 補完フェーズに validate_metadata.py を追加、docs/metadata-schema.md 参照を追加） |
 | 2026-05-23 | tags 自動生成対応（tag_utils.py、validate --fix で自動補完、レポートに tags 統計追加） |
+| 2026-05-23 | summary 自動生成対応（summary_utils.py、validate --fix/--summary-refresh で補完・再生成） |
