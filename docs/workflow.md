@@ -123,12 +123,17 @@ PDF / 画像ファイル
         |
         | python scripts/generate_metadata.py（残り分の補完）
         ↓
-[Metadata 補完]
+[Metadata 補完・検証]
   processing/metadata-ready/ の .metadata.json を確認・補完
-  - category（必須）
+  - category（必須 / enum: Receipt/Utility/Finance/Insurance/School/Government/Medical/Work/Contract/Tax/Other）
+  - document（category ごとの推奨値: docs/metadata-schema.md 参照）
   - counterparty（あれば）
   - amount_jpy / payment_method（あれば）
-  - discard_date（保存期間から計算）
+  - discard_date（issue_date + retention から自動計算）
+  python scripts/validate_metadata.py --fix    # 自動修正（フィールド名移行・discard_date 計算・tags 自動補完）
+  python scripts/validate_metadata.py --report # 検証レポートを processing/metadata-reports/ へ出力
+  スキーマ定義: docs/metadata-schema.md
+  tags 生成ルール: scripts/tag_utils.py
         |
         | 人間による最終確認（docs/export-rules.md の条件を満たしたか確認）
         ↓
@@ -174,7 +179,7 @@ PDF / 画像ファイル
 | Review | **Human + Claude Cowork** | 文字化け修正・Category 決定・廃棄判断 |
 | Apply | **Human 確認後に Claude Cowork** | `process_inbox.py --apply` で safe copy + metadata 自動生成 |
 | Rename 補完 | **Human / Claude Cowork** | renamed/ のファイル名に Category を手動追加 |
-| Metadata 補完 | **Claude Cowork** | `.metadata.json` を開いて category 等を補完 |
+| Metadata 補完 | **Claude Cowork** | `.metadata.json` を開いて category 等を補完、`validate_metadata.py --fix` で検証 |
 | Export Buffer | **Human** | export-rules を確認して export/ または archive/ へ移動 |
 | Archive Input | **Claude Cowork** | `archive_input.py --apply` で inbox 原本を月別アーカイブ |
 | Dropbox | **Human** | 月次で export/ → Dropbox へ手動転送 |
@@ -211,7 +216,15 @@ PDF / 画像ファイル
         → Category が入っていないファイルはファイル名を手動で修正
 
 [ ] 8.  processing/metadata-ready/ の .metadata.json を開いて不足項目を補完
-        → category, counterparty, discard_date など
+        → category, document, counterparty など
+        → スキーマ定義は docs/metadata-schema.md を参照
+
+[ ] 8b. python scripts/validate_metadata.py --fix --report
+        → 自動修正（schema_version 付与・フィールド名移行・discard_date 自動計算・tags 自動補完）
+        → 検証レポートを processing/metadata-reports/ へ出力（tags 統計含む）
+        → ERROR が 0 件になるまで補完を続ける
+        → WARNING は推奨値外の document など（許容だが Notion 連携精度低下）
+        → tags 追加件数・tag TOP5・tags なし件数がサマリーに表示される
 
 [ ] 9.  python scripts/check_export_ready.py
         → Export ready: YES になることを確認
@@ -261,6 +274,7 @@ PDF / 画像ファイル
 | [`docs/naming-convention.md`](naming-convention.md) | ファイル命名規約 |
 | [`docs/categories.md`](categories.md) | Category 一覧と分類ガイド |
 | [`docs/payment-methods.md`](payment-methods.md) | 支払手段一覧 |
+| [`docs/metadata-schema.md`](metadata-schema.md) | metadata schema v1 定義・フィールド一覧 |
 | [`docs/export-rules.md`](export-rules.md) | export 可能条件と処理フロー |
 | [`docs/dropbox-structure.md`](dropbox-structure.md) | Dropbox フォルダ構造 |
 | [`docs/architecture.md`](architecture.md) | ツール別役割定義 |
@@ -272,3 +286,5 @@ PDF / 画像ファイル
 | 日付 | 内容 |
 |---|---|
 | 2026-05-17 | 初期作成 |
+| 2026-05-23 | metadata schema v1 対応（Metadata 補完フェーズに validate_metadata.py を追加、docs/metadata-schema.md 参照を追加） |
+| 2026-05-23 | tags 自動生成対応（tag_utils.py、validate --fix で自動補完、レポートに tags 統計追加） |

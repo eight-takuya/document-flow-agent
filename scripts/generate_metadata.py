@@ -10,9 +10,16 @@ processing/metadata-ready/ に .metadata.json として保存する。
 
 import json
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# tag_utils は同ディレクトリにある
+_SCRIPTS_DIR = Path(__file__).parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+from tag_utils import generate_tags, merge_tags  # noqa: E402
 
 PROCESSING_DIR = Path(__file__).parent.parent / "processing"
 RENAMED_DIR = PROCESSING_DIR / "renamed"
@@ -23,7 +30,7 @@ AMOUNT_PATTERN = re.compile(r"^(\d+)JPY$")
 
 PAYMENT_METHODS = {
     "AMEX", "SMBC", "RakutenCard", "PayPay",
-    "Cash", "BankTransfer", "DirectDebit", "Other",
+    "Cash", "BankTransfer", "DirectDebit", "Suica", "Other",
 }
 
 RETENTION_YEARS = {
@@ -35,13 +42,14 @@ RETENTION_YEARS = {
     "Medical": 5,
     "School": 3,
     "Government": 7,
-    "Expense": 5,
+    "Finance": 5,
     "Receipt": 3,
     "Utility": 3,
-    "Family": 5,
-    "Action": 3,
     "Other": 3,
 }
+
+# document が [要確認] プレースホルダーの場合に status を document-unknown に変換
+DOCUMENT_PLACEHOLDER_PATTERN = re.compile(r"^\[.*要確認.*\]$")
 
 
 def load_template() -> dict:
@@ -104,40 +112,100 @@ def calc_retention(category: str) -> str:
     return f"{years}年"
 
 
-def generate_metadata(filename: str, source_filename: Optional[str] = None) -> dict:
+def calc_discard_date(issue_date: str, retention: str) -> str:
     """
-    ファイル名から metadata scaffold を生成する。
+    issue_date (YYYY-MM-DD) と retention ("N年") から廃棄予定日を計算する。
+    issue_date が不正の場合は空文字を返す。
+    """
+    if not issue_date or len(issue_date) < 4:
+        return ""
+    m = re.match(r"(\d+)年", retention)
+    if not m:
+        return ""
+    years = int(m.group(1))
+    try:
+        y, mo, d = int(issue_date[:4]), int(issue_date[5:7]), int(issue_date[8:10])
+        return f"{y + years:04d}-{mo:02d}-{d:02d}"
+    except (ValueError, IndexError):
+        return ""
+
+
+def generate_metadata(
+    filename: str,
+    source_filename: Optional[str] = None,
+    ocr_data: Optional[dict] = None,
+) -> dict:
+    """
+    ファイル名から metadata scaffold を生成する（schema v1）。
 
     Args:
-        filename:        命名規約に従ったファイル名（例: 20260517-Expense-会食-焼肉きんぐ-12000JPY-AMEX.pdf）
+        filename:        命名規約に従ったファイル名
         source_filename: inbox での元ファイル名（分かる場合）
+        ocr_data:        process_inbox.py からの OCR 結果（confidence, ocr_engine,
+                         normalized_pdf, original_extension, split_* など）
 
     Returns:
-        metadata dict（templates/metadata_template.json のスキーマに準拠）
+        metadata dict（schema v1 に準拠）
     """
     parsed = parse_filename(filename)
     template = load_template()
+    ocr = ocr_data or {}
 
-    event_date = format_event_date(parsed["date"])
+    issue_date = format_event_date(parsed["date"])
+    category = parsed["category"]
+    retention = calc_retention(category)
+    discard_date = calc_discard_date(issue_date, retention)
+
+    # [Document要確認] プレースホルダーを status に分離
+    document = parsed["document"]
+    if DOCUMENT_PLACEHOLDER_PATTERN.match(document):
+        document = ""
+        initial_status = "document-unknown"
+    else:
+        initial_status = ocr.get("status", "renamed")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     metadata = dict(template)
-    metadata["title"] = parsed["document"] or ""
+    # --- v1 必須フィールド ---
+    metadata["schema_version"] = "v1"
     metadata["file_name"] = filename
-    metadata["source_file_name"] = source_filename or ""
-    metadata["file_type"] = Path(filename).suffix.lstrip(".").upper()
-    metadata["category"] = parsed["category"]
-    metadata["document"] = parsed["document"]
+    metadata["source_file"] = source_filename or ocr.get("source_file", "")
+    metadata["file_type"] = "PDF"
+    metadata["original_extension"] = ocr.get("original_extension", Path(filename).suffix)
+    metadata["normalized_pdf"] = bool(ocr.get("normalized_pdf", False))
+    metadata["category"] = category
+    metadata["document"] = document
     metadata["counterparty"] = parsed["counterparty"]
-    metadata["event_date"] = event_date
+    metadata["issue_date"] = issue_date
     metadata["amount_jpy"] = parsed["amount_jpy"]
     metadata["payment_method"] = parsed["payment_method"]
-    metadata["retention"] = calc_retention(parsed["category"])
-    metadata["discard_date"] = ""
-    metadata["status"] = "pending"
+    metadata["retention"] = retention
+    metadata["discard_date"] = discard_date
+    metadata["confidence"] = ocr.get("confidence", None)
+    metadata["ocr_engine"] = ocr.get("ocr_engine", "vision" if ocr else "filename")
+    metadata["status"] = initial_status
+    # --- 任意フィールド ---
+    metadata["archive_path"] = ocr.get("archive_path", "")
+    metadata["export_path"] = ocr.get("export_path", "")
+    # tags: OCR由来タグと自動生成タグをマージして初期付与
+    base_tags: list = ocr.get("tags", [])
+    auto_tags = generate_tags(metadata)
+    metadata["tags"] = merge_tags(base_tags, auto_tags)
     metadata["notion_registered"] = False
     metadata["dropbox_exported"] = False
     metadata["notes"] = ""
-    metadata["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    metadata["created_at"] = now
+    metadata["updated_at"] = now
+    # --- split PDF フィールド ---
+    if ocr.get("split_pdf"):
+        metadata["split_pdf"] = True
+        metadata["split_source"] = ocr.get("split_source", "")
+        metadata["split_page"] = ocr.get("split_page")
+        metadata["split_total"] = ocr.get("split_total")
+
+    # 後方互換フィールド（既存ツールが参照している可能性があるもの）
+    metadata["title"] = document or parsed["document"] or ""
 
     return metadata
 

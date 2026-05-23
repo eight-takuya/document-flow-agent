@@ -37,6 +37,7 @@ document-flow-agent/
 │   ├── review-required/      # 確認が必要なファイルのレポート
 │   ├── renamed/              # リネーム済みファイル
 │   ├── metadata-ready/       # metadata JSON 生成済みファイル
+│   ├── metadata-reports/     # validate_metadata.py の検証レポート
 │   └── ocr-error/            # 文字化け疑いのレポート
 ├── archive/                  # ローカル整理済ファイル
 ├── export/                   # Dropbox 移動予定ファイル（人間確認済みバッファ）
@@ -181,15 +182,28 @@ python scripts/process_inbox.py --apply
 - 同時に `processing/metadata-ready/` に `.metadata.json` を自動生成
 - metadata の `category` 欄は空（人間が後で補完）
 
-### Step 6 — metadata 補完
+### Step 6 — metadata 補完・検証
 
-`processing/metadata-ready/` の `.metadata.json` を開いて不足項目を補完する。
+`processing/metadata-ready/` の `.metadata.json` を確認・補完する。
 
 ```bash
-python scripts/generate_metadata.py  # renamed/ に残ったファイルの分を追加生成
+python scripts/generate_metadata.py         # renamed/ に残ったファイルの分を追加生成
+python scripts/validate_metadata.py         # 全件検証（エラー・警告を表示）
+python scripts/validate_metadata.py --fix   # 自動修正可能な問題を一括修正
+python scripts/validate_metadata.py --report  # JSON + MD レポートを processing/metadata-reports/ へ出力
 ```
 
-### Step 6 — export 準備確認と export/ へのコピー
+metadata は **schema v1** に準拠します。詳細は [`docs/metadata-schema.md`](docs/metadata-schema.md) を参照。
+
+**自動修正される内容**
+- `schema_version` 付与（未設定 → `"v1"`）
+- `source_file_name` → `source_file` フィールド名移行
+- `event_date` → `issue_date` フィールド名移行
+- `discard_date` 自動計算（`issue_date + retention` 年数）
+- `[Document要確認]` → `document=""` + `status="document-unknown"` に分離
+- 無効な `category` → `"Other"` に正規化
+
+### Step 7 — export 準備確認と export/ へのコピー
 
 #### export 可能条件
 
@@ -288,6 +302,54 @@ Category 一覧は [`docs/categories.md`](docs/categories.md)、支払手段は 
 
 ---
 
+## metadata schema v1
+
+`processing/metadata-ready/*.metadata.json` は **schema v1** に準拠します。
+
+### 主要フィールド
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `schema_version` | `string` | `"v1"` 固定 |
+| `file_name` | `string` | rename 後のファイル名 |
+| `source_file` | `string` | inbox での元ファイル名 |
+| `category` | enum | `Receipt` / `Utility` / `Finance` / `Insurance` / `School` / `Government` / `Medical` / `Work` / `Contract` / `Tax` / `Other` |
+| `document` | `string` | 文書種別（category ごとに推奨値あり） |
+| `issue_date` | `string` | 発行日 `YYYY-MM-DD` |
+| `discard_date` | `string` | 廃棄予定日（`issue_date + retention` から自動計算） |
+| `status` | enum | `auto-approved` / `renamed` / `document-unknown` / `review-required` / `ocr-error` / `discarded` / `exported` / `pending` |
+| `amount_jpy` | `integer\|null` | 金額（円） |
+| `payment_method` | enum | `Cash` / `BankTransfer` / `AMEX` / `SMBC` / `RakutenCard` / `PayPay` / `Suica` / `Other` / `""` |
+
+詳細スキーマ定義: [`docs/metadata-schema.md`](docs/metadata-schema.md)
+
+---
+
+## Tags 自動生成
+
+metadata 生成時・検証時に、以下の情報から **日本語タグ** を自動付与します。
+
+| 情報源 | 生成タグ例 |
+|---|---|
+| category | `Receipt` → `領収証` / `Utility` → `公共料金` / `Finance` → `金融` |
+| document | `クレジットカード明細` → `クレカ明細` / `領収書` → `支払証跡` |
+| counterparty | `日本年金機構` → `年金` / `千葉県企業局` → `水道, 公共料金` |
+| amount_jpy | `> 0` → `金額あり` / `≥ 100,000` → `高額` |
+| payment_method | `AMEX/SMBC/RakutenCard` → `クレジットカード` / `Cash` → `現金` |
+| retention | `7年` → `7年保管` / `5年` → `5年保管` |
+
+```bash
+python scripts/generate_metadata.py         # 新規生成時に tags 初期付与
+python scripts/validate_metadata.py --fix   # 既存 metadata の tags を不足分補完
+```
+
+- 既存タグは削除しない（追加のみ）
+- 重複排除済み
+- Notion 連携・Dropbox 検索・RAG 検索に対応した粒度
+- タグ定義: `scripts/tag_utils.py` / `docs/metadata-schema.md`
+
+---
+
 ## スクリプト一覧
 
 | スクリプト | 役割 | 実行タイミング |
@@ -297,7 +359,9 @@ Category 一覧は [`docs/categories.md`](docs/categories.md)、支払手段は 
 | `split_receipts.py` | 複数ページ PDF を 1ページ=1PDF に分割（process_inbox から自動呼び出し） | process_inbox 内部 |
 | `process_inbox.py` | 分析・rename 候補・レポート生成 | normalize の次 |
 | `rename_documents.py` | 命名規約のファイル名生成・検証 | rename 時に参照 |
-| `generate_metadata.py` | metadata scaffold 生成 | renamed/ 配置後 |
+| `generate_metadata.py` | metadata scaffold 生成（schema v1 / tags自動付与） | renamed/ 配置後 |
+| `tag_utils.py` | metadata tags 自動生成ユーティリティ（generate_metadata / validate_metadata から呼ばれる） | 内部モジュール |
+| `validate_metadata.py` | metadata schema v1 検証・自動修正・tags補完・レポート出力 | metadata 補完後 |
 | `review_server.py` | review-report HTML 表示・保存用ローカルサーバー | review-required 確認時 |
 | `apply_review_decisions.py` | review-decisions.json を処理して rename/discard/skip を実行 | review HTML 確認後 |
 | `check_export_ready.py` | export 可能か判定（review 残・renamed 有無・metadata 対応） | export 前 |
