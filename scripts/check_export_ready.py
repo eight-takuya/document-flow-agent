@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(Path(__file__).parent))
 RENAMED_DIR = ROOT / "processing" / "renamed"
 AUTO_APPROVED_DIR = ROOT / "processing" / "auto-approved"
 METADATA_DIR = ROOT / "processing" / "metadata-ready"
@@ -91,6 +92,17 @@ def _ocr_error_report_count() -> int:
     return len([f for f in OCR_ERROR_DIR.glob("*.html")])
 
 
+def _export_v2_category_counts() -> dict:
+    """export/files/<category>/ 配下の PDF 件数を category 別に返す。"""
+    from export_utils import VALID_CATEGORIES, EXPORT_FILES_DIR
+    counts = {}
+    for cat in sorted(VALID_CATEGORIES):
+        cat_dir = EXPORT_FILES_DIR / cat
+        if cat_dir.exists():
+            counts[cat] = len([f for f in cat_dir.glob("*.pdf")])
+    return counts
+
+
 def _unmatched_pdfs(pdfs: list, metadata: list) -> list:
     """PDF に対応する metadata がないファイルを返す。"""
     metadata_stems = {f.name.replace(".metadata.json", "") for f in metadata}
@@ -147,6 +159,12 @@ def run() -> bool:
     ocr_count = _ocr_error_report_count()
     if ocr_count:
         warnings.append(f"ocr-error files remain: {ocr_count} (手動対応が必要です)")
+
+    # 7. export v2 category 別件数
+    v2_counts = _export_v2_category_counts()
+    if v2_counts:
+        total_v2 = sum(v2_counts.values())
+        infos.append(f"export v2 category dirs: {total_v2} 件 ({', '.join(f'{c}:{n}' for c, n in v2_counts.items() if n > 0)})")
 
     # 出力
     for msg in infos:

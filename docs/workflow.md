@@ -140,10 +140,11 @@ PDF / 画像ファイル
         | 人間による最終確認（docs/export-rules.md の条件を満たしたか確認）
         ↓
 [Export Buffer]
-  python scripts/check_export_ready.py  ← export 可能か確認
-  python scripts/export_to_dropbox.py --local  ← export/files/ と export/metadata/ へコピー
-  - export/files/    : renamed/ PDF のコピー
-  - export/metadata/ : metadata-ready/ JSON のコピー
+  python scripts/check_export_ready.py  ← export 可能か確認（v2 category 別件数も表示）
+  python scripts/export_to_dropbox.py --local  ← export/files/<category>/ と export/metadata/<category>/ へコピー（v2構造）
+  - export/files/<category>/    : renamed/ PDF のコピー（Receipt/Finance/Utility 等）
+  - export/metadata/<category>/ : metadata-ready/ JSON のコピー（同構造）
+  category は PDF ファイル名・metadata から自動判定（不明時は Other/）
   ※ 元ファイル（renamed/, metadata-ready/）は削除しない
         |
         | 月次・手動
@@ -292,3 +293,4 @@ PDF / 画像ファイル
 | 2026-05-23 | metadata schema v1 対応（Metadata 補完フェーズに validate_metadata.py を追加、docs/metadata-schema.md 参照を追加） |
 | 2026-05-23 | tags 自動生成対応（tag_utils.py、validate --fix で自動補完、レポートに tags 統計追加） |
 | 2026-05-23 | summary 自動生成対応（summary_utils.py、validate --fix/--summary-refresh で補完・再生成） |
+| 2026-05-23 | export structure v2 対応（category サブディレクトリ構造、migrate_export_v2.py、export_utils.py） |

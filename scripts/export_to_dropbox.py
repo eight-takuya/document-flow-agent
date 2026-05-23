@@ -8,10 +8,15 @@ Usage:
     python scripts/export_to_dropbox.py --local           # export/ へコピー（デフォルト）
     python scripts/export_to_dropbox.py --local --dry-run # コピーせずに確認のみ
 
-export/ 構成:
+export/ 構成（v2 — category サブディレクトリ構造）:
     export/
-    ├── files/      # renamed/ からコピーした PDF
-    └── metadata/   # metadata-ready/ からコピーした .metadata.json
+    ├── files/
+    │   ├── Receipt/
+    │   ├── Finance/
+    │   ├── Utility/
+    │   └── ...（category 別）
+    └── metadata/
+        └── ...（同構造）
 
 安全設計:
     - 元ファイル（processing/renamed/, processing/metadata-ready/）は削除しない
@@ -39,8 +44,10 @@ EXPORT_FILES_DIR = EXPORT_DIR / "files"
 EXPORT_META_DIR = EXPORT_DIR / "metadata"
 LOGS_DIR = ROOT / "logs"
 
-sys.path.insert(0, str(Path(__file__).parent))
+_SCRIPTS_DIR = Path(__file__).parent
+sys.path.insert(0, str(_SCRIPTS_DIR))
 from check_export_ready import run as check_ready
+from export_utils import get_category, get_export_pdf_dir, get_export_meta_dir, safe_copy_dest
 
 
 def _setup_logging(timestamp: str, dry_run: bool) -> logging.Logger:
@@ -60,17 +67,8 @@ def _setup_logging(timestamp: str, dry_run: bool) -> logging.Logger:
 
 
 def _safe_copy_dest(dest_dir: Path, filename: str) -> Path:
-    """重複時に -001, -002 ... の連番を付けた保存先パスを返す。"""
-    candidate = dest_dir / filename
-    if not candidate.exists():
-        return candidate
-    stem = Path(filename).stem
-    suffix = Path(filename).suffix
-    for i in range(1, 1000):
-        candidate = dest_dir / f"{stem}-{i:03d}{suffix}"
-        if not candidate.exists():
-            return candidate
-    raise RuntimeError(f"空きパスが見つかりません: {filename}")
+    """重複時に -001, -002 ... の連番を付けた保存先パスを返す（export_utils.safe_copy_dest を使用）。"""
+    return safe_copy_dest(dest_dir, filename)
 
 
 def _collect_pdfs() -> list:
@@ -91,18 +89,19 @@ def _collect_metadata() -> list:
 
 def _copy_file(src: Path, dest_dir: Path, dry_run: bool, logger: logging.Logger) -> tuple:
     """
-    src を dest_dir へ safe copy する。
+    src を dest_dir へ safe copy する（v2: category サブディレクトリへ）。
     Returns: (dest_path, skipped: bool)
     """
     dest = _safe_copy_dest(dest_dir, src.name)
+    rel_dest = dest.relative_to(EXPORT_DIR)
     if dry_run:
         suffix = " [new]" if dest.name == src.name else f" [→ {dest.name}]"
-        logger.info("[DRY-RUN] COPY %s → %s/%s%s", src.name, dest_dir.name, dest.name, suffix)
+        logger.info("[DRY-RUN] COPY %s → export/%s%s", src.name, rel_dest, suffix)
         return dest, False
     dest_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
     suffix = "" if dest.name == src.name else f" (→ {dest.name})"
-    logger.info("COPY  %s → %s/%s%s", src.name, dest_dir.name, dest.name, suffix)
+    logger.info("COPY  %s → export/%s%s", src.name, rel_dest, suffix)
     return dest, False
 
 
@@ -131,21 +130,38 @@ def run_local(dry_run: bool = False) -> None:
     copied_meta = 0
     skipped = 0
 
-    # PDF のコピー
-    logger.info("--- PDF のコピー: renamed/ → export/files/ ---")
+    # PDF のコピー（v2: category サブディレクトリへ）
+    logger.info("--- PDF のコピー: renamed/ → export/files/<category>/ ---")
     for pdf in pdfs:
         try:
-            _copy_file(pdf, EXPORT_FILES_DIR, dry_run, logger)
+            # metadata から category を取得（あれば）
+            meta_path = METADATA_DIR / (pdf.stem + ".metadata.json")
+            meta_data = None
+            if meta_path.exists():
+                try:
+                    meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            category = get_category(pdf.name, metadata=meta_data)
+            dest_dir = get_export_pdf_dir(category)
+            _copy_file(pdf, dest_dir, dry_run, logger)
             copied_pdfs += 1
         except Exception as e:
             logger.warning("SKIP %s: %s", pdf.name, e)
             skipped += 1
 
-    # metadata のコピー
-    logger.info("--- metadata のコピー: metadata-ready/ → export/metadata/ ---")
+    # metadata のコピー（v2: category サブディレクトリへ）
+    logger.info("--- metadata のコピー: metadata-ready/ → export/metadata/<category>/ ---")
     for meta in metadata:
         try:
-            _copy_file(meta, EXPORT_META_DIR, dry_run, logger)
+            meta_data = None
+            try:
+                meta_data = json.loads(meta.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+            category = get_category(meta.name, metadata=meta_data)
+            dest_dir = get_export_meta_dir(category)
+            _copy_file(meta, dest_dir, dry_run, logger)
             copied_meta += 1
         except Exception as e:
             logger.warning("SKIP %s: %s", meta.name, e)
