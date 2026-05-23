@@ -38,6 +38,7 @@ METADATA_READY_DIR = PROCESSING_DIR / "metadata-ready"
 REVIEW_DIR = PROCESSING_DIR / "review-required"
 OCR_ERROR_DIR = PROCESSING_DIR / "ocr-error"
 NORMALIZED_DIR = PROCESSING_DIR / "normalized"
+SPLIT_DIR = PROCESSING_DIR / "splitted"
 LOGS_DIR = REPO_ROOT / "logs"
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -60,6 +61,10 @@ from ocr_extract import (
 )
 from ocr_utils import extract_text_with_engine
 from normalize_images import normalize_image, ACCEPTED_IMAGE_SUFFIXES
+from split_receipts import (
+    count_pages, split_pdf, scan_inbox_multipage,
+    PYPDF_AVAILABLE, DEFAULT_SPLIT_MAX_PAGES,
+)
 
 MAX_STEM_LENGTH = 80
 DATE_PREFIX_PATTERN = re.compile(r"^\d{8}[_\-\s]?")
@@ -103,8 +108,21 @@ def _build_best_effort_name(name: str) -> str:
     return "-".join(parts) + ".pdf"
 
 
-def analyze_file(path: Path, use_ocr: bool, patterns: Optional[list] = None) -> Dict:
-    """ファイルを分析してフラグ・OCR結果・rename 候補・confidenceを返す。"""
+def analyze_file(
+    path: Path,
+    use_ocr: bool,
+    patterns: Optional[list] = None,
+    split_source: str = "",
+    split_page: int = 0,
+    split_total: int = 0,
+) -> Dict:
+    """
+    ファイルを分析してフラグ・OCR結果・rename 候補・confidenceを返す。
+
+    split_source: 分割元 PDF ファイル名（分割済みページの場合のみ）
+    split_page:   分割後のページ番号（1 始まり）
+    split_total:  元 PDF の総ページ数
+    """
     name = path.name
     kind = classify_file(path)
     date = extract_date(name)
@@ -152,10 +170,12 @@ def analyze_file(path: Path, use_ocr: bool, patterns: Optional[list] = None) -> 
         ocr_text = result.text
         ocr_engine = result.engine
         if ocr_text:
-            ocr_fields = parse_rename_fields(ocr_text, name, tags)
+            # 分割ページの場合は元ファイル名を OCR 文脈に含める（日付・カテゴリ推定に使う）
+            ocr_name_hint = split_source if split_source else name
+            ocr_fields = parse_rename_fields(ocr_text, ocr_name_hint, tags)
             # pattern matching
             if patterns:
-                ocr_fields, pattern_reasons = apply_patterns(ocr_text, name, ocr_fields, patterns)
+                ocr_fields, pattern_reasons = apply_patterns(ocr_text, ocr_name_hint, ocr_fields, patterns)
                 pattern_matched = bool(pattern_reasons)
                 confidence_reasons.extend(pattern_reasons)
             ocr_rename_candidate = build_ocr_rename_candidate(ocr_fields)
@@ -207,6 +227,11 @@ def analyze_file(path: Path, use_ocr: bool, patterns: Optional[list] = None) -> 
         "warnings": warnings,
         "normalized_path": normalized_path,
         "original_extension": original_extension,
+        # PDF 分割情報（分割ページの場合のみ設定）
+        "split_source": split_source,
+        "split_page": split_page,
+        "split_total": split_total,
+        "is_split": bool(split_source),
     }
 
 
@@ -447,6 +472,18 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
             conf_label = "confidence: —"
         ocr_engine_label = esc(item.get("ocr_engine", "none"))
 
+        # 分割ページ情報バッジ
+        split_badge = ""
+        if item.get("is_split"):
+            split_src = esc(item.get("split_source", ""))
+            split_pg = item.get("split_page", 0)
+            split_tot = item.get("split_total", 0)
+            split_badge = (
+                f'<span class="badge badge-split" title="source PDF: {split_src}">'
+                f'p{split_pg}/{split_tot} ({split_src})'
+                f'</span>'
+            )
+
         cards.append(f"""
   <div class="card {status_cls}" id="{card_id}"
        data-source-name="{name}"
@@ -458,6 +495,7 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
       </span>
       <span class="badge {conf_cls}">{conf_label}</span>
       <span class="badge badge-engine">engine: {ocr_engine_label}</span>
+      {split_badge}
       <span class="filename">{name}</span>
     </div>
 
@@ -546,6 +584,7 @@ def _write_html_report(items: List[Dict], path: Path, report_type: str) -> None:
   .badge-conf-low {{ background: #f8d7da; color: #721c24; }}
   .badge-conf-none {{ background: #e9ecef; color: #6c757d; }}
   .badge-engine {{ background: #e8f0fe; color: #1a56db; font-weight: 400; }}
+  .badge-split  {{ background: #f3e8ff; color: #6b21a8; font-weight: 400; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
   .section {{ padding: 10px 16px; border-bottom: 1px solid #f5f5f5; }}
   .section:last-child {{ border-bottom: none; }}
   .label {{ font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }}
@@ -883,7 +922,8 @@ def _launch_review_server(review_count: int) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
-def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
+def run(apply: bool, use_ocr: bool, open_review: bool = True, no_split: bool = False,
+        split_max_pages: int = DEFAULT_SPLIT_MAX_PAGES) -> None:
     mode = "apply" if apply else "dry-run"
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -901,15 +941,93 @@ def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
     print(f"[SCAN]  mode={mode}  ocr={'on' if use_ocr else 'off'}  patterns={len(patterns)}")
     _sep()
     print(f"Found {len(all_files)} files in inbox/")
+    print()
+
+    # -----------------------------------------------------------------------
+    # PDF 分割フェーズ（複数ページ PDF → processing/splitted/ に 1ページ = 1PDF）
+    # -----------------------------------------------------------------------
+    # split_map: {original_path → [split_page_paths]}
+    # replace_map: {original_path → [split_page_paths]}  (分割後は original を解析対象から外す)
+    split_map: Dict[Path, List[Path]] = {}
+    split_skipped: List[Path] = []   # split 対象外（1ページ / エラー）
+    split_pdf_count = 0              # 分割元 PDF 数
+    split_page_total = 0             # 生成される分割ページ総数
+    split_large_warned: List[str] = []  # max_pages 超で除外された大型文書
+
+    if not no_split and PYPDF_AVAILABLE:
+        split_targets, skip_targets = scan_inbox_multipage(INBOX_DIR, split_max_pages)
+
+        if split_targets or skip_targets:
+            print(f"[SPLIT] — 複数ページ PDF を 1ページ=1PDF に分割（→ processing/splitted/）"
+                  f"  max-pages={split_max_pages}")
+            _sep("-")
+
+            # 大型文書（max_pages 超）は分割せずスキップ
+            for pdf_path, n_pages in skip_targets:
+                split_large_warned.append(pdf_path.name)
+                print(f"  {pdf_path.name}  ({n_pages} ページ)  ⚠ 大型文書 — 分割スキップ（>{split_max_pages}p）")
+
+            # 分割対象
+            for pdf_path, n_pages in split_targets:
+                split_pdf_count += 1
+                split_page_total += n_pages
+                print(f"  {pdf_path.name}  ({n_pages} ページ)")
+                try:
+                    # apply / dry-run いずれも実際に分割ファイルを生成する
+                    # （OCR に必要なため。ファイルは processing/splitted/ に書き出す）
+                    split_pages = split_pdf(pdf_path, SPLIT_DIR, dry_run=False)
+                    split_map[pdf_path] = split_pages
+                    for sp in split_pages:
+                        print(f"    → {sp.name}")
+                except ValueError as e:
+                    print(f"    ⚠ 分割スキップ: {e}")
+                    split_skipped.append(pdf_path)
+                except RuntimeError as e:
+                    print(f"    ERROR: {e}")
+            print()
+
+    # 分析対象ファイルリストを構築:
+    #   - 分割された PDF → split ページで置き換え
+    #   - 1ページ PDF / 画像 / 非対応 → そのまま
+    analysis_targets: List[Dict] = []   # {"path": Path, "split_source": str, "split_page": int, "split_total": int}
+
+    for f in classified["PDF"]:
+        if f in split_map:
+            split_pages = split_map[f]
+            n_total = len(split_pages)
+            for i, sp in enumerate(split_pages, start=1):
+                analysis_targets.append({
+                    "path": sp,
+                    "split_source": f.name,
+                    "split_page": i,
+                    "split_total": n_total,
+                })
+        else:
+            analysis_targets.append({"path": f, "split_source": "", "split_page": 0, "split_total": 0})
+
+    for f in classified["IMAGE"] + classified["UNSUPPORTED"]:
+        analysis_targets.append({"path": f, "split_source": "", "split_page": 0, "split_total": 0})
+
+    total_analysis = len(analysis_targets)
+    ocr_count_target = sum(1 for t in analysis_targets if classify_file(t["path"]) in ("PDF", "IMAGE"))
+
     if use_ocr:
-        print(f"Running OCR on {len(classified['PDF']) + len(classified['IMAGE'])} files ...")
+        print(f"Running OCR on {ocr_count_target} files ({total_analysis} total) ...")
+    else:
+        print(f"Analyzing {total_analysis} files ...")
     print()
 
     analyses = []
-    for f in all_files:
-        sys.stdout.write(f"  Analyzing: {f.name[:50]!s:<52}\r")
+    for target in analysis_targets:
+        p = target["path"]
+        sys.stdout.write(f"  Analyzing: {p.name[:50]!s:<52}\r")
         sys.stdout.flush()
-        analyses.append(analyze_file(f, use_ocr, patterns))
+        analyses.append(analyze_file(
+            p, use_ocr, patterns,
+            split_source=target["split_source"],
+            split_page=target["split_page"],
+            split_total=target["split_total"],
+        ))
     sys.stdout.write(" " * 60 + "\r")
 
     all_normal = [a for a in analyses if not a["needs_review"]]
@@ -944,6 +1062,11 @@ def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
                 if item.get("normalized_path"):
                     metadata["original_extension"] = item["original_extension"]
                     metadata["normalized_pdf"] = True
+                if item.get("is_split"):
+                    metadata["split_source"] = item["split_source"]
+                    metadata["split_page"] = item["split_page"]
+                    metadata["split_total"] = item["split_total"]
+                    metadata["split_pdf"] = True
                 meta_path = save_metadata(metadata, METADATA_READY_DIR)
                 meta_rel = meta_path.relative_to(REPO_ROOT)
                 auto_copied_count += 1
@@ -980,6 +1103,11 @@ def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
             if item.get("normalized_path"):
                 metadata["original_extension"] = item["original_extension"]
                 metadata["normalized_pdf"] = True
+            if item.get("is_split"):
+                metadata["split_source"] = item["split_source"]
+                metadata["split_page"] = item["split_page"]
+                metadata["split_total"] = item["split_total"]
+                metadata["split_pdf"] = True
             meta_path = save_metadata(metadata, METADATA_READY_DIR)
             meta_rel = meta_path.relative_to(REPO_ROOT)
             copied_count += 1
@@ -1044,16 +1172,24 @@ def run(apply: bool, use_ocr: bool, open_review: bool = True) -> None:
     _sep()
     print("[SUMMARY]")
     _sep()
-    print(f"  mode           : {mode}")
-    print(f"  ocr            : {'enabled' if use_ocr else 'disabled'}")
-    print(f"  patterns loaded: {len(patterns)}")
-    print(f"  total          : {len(analyses)}")
-    print(f"  auto-approved  : {len(auto_approved_items)}  {'(dry-run: 0)' if not apply else f'(copied: {auto_copied_count})'}")
-    print(f"  rename 候補    : {len(normal)}")
-    print(f"  copy 実行      : {copied_count}  {'(dry-run: 0)' if not apply else ''}")
-    print(f"  metadata 生成  : {metadata_count}  {'(dry-run: 0)' if not apply else ''}")
-    print(f"  ocr-error      : {len(ocr_errors)}")
-    print(f"  review-required: {len(review_needed)}")
+    print(f"  mode              : {mode}")
+    print(f"  ocr               : {'enabled' if use_ocr else 'disabled'}")
+    print(f"  patterns loaded   : {len(patterns)}")
+    print(f"  inbox 総数        : {len(all_files)}")
+    if not no_split and PYPDF_AVAILABLE:
+        print(f"  複数ページ PDF    : {split_pdf_count}  (元ファイル数)")
+        print(f"  分割生成PDF数     : {split_page_total}  (1ページ=1PDF)")
+        if split_large_warned:
+            print(f"  ⚠ 大型文書警告   : {len(split_large_warned)} 件 — 手動確認推奨")
+            for fn in split_large_warned:
+                print(f"      {fn}")
+    print(f"  分析対象総数      : {len(analyses)}")
+    print(f"  auto-approved     : {len(auto_approved_items)}  {'(dry-run: コピーなし)' if not apply else f'(copied: {auto_copied_count})'}")
+    print(f"  rename 候補       : {len(normal)}")
+    print(f"  copy 実行         : {copied_count}  {'(dry-run: 0)' if not apply else ''}")
+    print(f"  metadata 生成     : {metadata_count}  {'(dry-run: 0)' if not apply else ''}")
+    print(f"  ocr-error         : {len(ocr_errors)}")
+    print(f"  review-required   : {len(review_needed)}")
     _sep()
 
     log_path = _write_log(
@@ -1108,17 +1244,23 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  python scripts/process_inbox.py                   # dry-run + OCR（デフォルト）
+  python scripts/process_inbox.py                   # dry-run + OCR + split（デフォルト）
   python scripts/process_inbox.py --dry-run         # 同上
   python scripts/process_inbox.py --no-ocr          # OCR なしで高速に実行
   python scripts/process_inbox.py --apply           # renamed/ へ safe copy + metadata 生成
   python scripts/process_inbox.py --no-open-review  # レビュー画面を自動起動しない
+  python scripts/process_inbox.py --no-split        # 複数ページ PDF を分割しない
         """,
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--dry-run", action="store_true", default=False)
     mode_group.add_argument("--apply", action="store_true", default=False)
     parser.add_argument("--no-ocr", action="store_true", default=False, help="OCR をスキップ")
+    parser.add_argument("--no-split", action="store_true", default=False,
+                        help="複数ページ PDF の分割をスキップ（元 PDF をそのまま OCR）")
+    parser.add_argument("--split-max-pages", type=int, default=DEFAULT_SPLIT_MAX_PAGES,
+                        metavar="N",
+                        help=f"この値以下のページ数のみ分割（デフォルト: {DEFAULT_SPLIT_MAX_PAGES}）。超えるものは大型文書として除外")
 
     review_group = parser.add_mutually_exclusive_group()
     review_group.add_argument(
@@ -1133,4 +1275,5 @@ examples:
 
     # --no-open-review が明示された場合のみ無効化。それ以外はデフォルトで自動起動
     open_review = not args.no_open_review
-    run(apply=args.apply, use_ocr=not args.no_ocr, open_review=open_review)
+    run(apply=args.apply, use_ocr=not args.no_ocr, open_review=open_review,
+        no_split=args.no_split, split_max_pages=args.split_max_pages)

@@ -1,5 +1,5 @@
 {
-  "version": "1.1",
+  "version": "1.2",
   "description": "キーワード→Category/Document/Counterparty 推定パターン。process_inbox.py が読み込む。新しいパターンを追記して運用改善できる。",
   "patterns": [
     { "keywords": ["業務完了通知書", "業務完了"], "category": "Work", "document": "業務完了通知書" },
@@ -39,6 +39,22 @@
     { "keywords": ["Teamを用意", "Teamsにログイン", "Teamには参加"], "category": "School", "document": "Teams接続情報" },
 
     { "keywords": ["青少年補導員連絡協議会", "補導員連絡協議会"], "category": "Other", "document": "補導員連絡協議会案内" },
-    { "keywords": ["少年警察ボランティア", "少年醬察ボランティア"], "category": "Other", "document": "警察ボランティア協議会案内" }
+    { "keywords": ["少年警察ボランティア", "少年醬察ボランティア"], "category": "Other", "document": "警察ボランティア協議会案内" },
+
+    { "_comment": "=== v1.2 追加: Receipt 系（タクシー・交通費）===" },
+    { "keywords": ["タクシー領収書", "タクシー領収証"], "category": "Receipt", "document": "タクシー領収書" },
+    { "keywords": ["山手タクシー"], "category": "Receipt", "document": "領収書", "counterparty": "山手タクシー" },
+    { "keywords": ["志太交通"], "category": "Receipt", "document": "領収書", "counterparty": "志太交通" },
+    { "keywords": ["交栄個人タクシー", "交栄個人"], "category": "Receipt", "document": "領収書", "counterparty": "交栄個人タクシー協同組合" },
+    { "keywords": ["日個連", "日本個人タクシー協同組合"], "category": "Receipt", "document": "領収書", "counterparty": "日個連" },
+    { "keywords": ["個人タクシー協同組合"], "category": "Receipt", "document": "タクシー領収書" },
+    { "keywords": ["松村運輸"], "category": "Receipt", "document": "領収書", "counterparty": "松村運輸" },
+    { "keywords": ["両毛自動車", "両毛自動中"], "category": "Receipt", "document": "領収書", "counterparty": "両毛自動車" },
+
+    { "_comment": "=== v1.2 追加: Finance 系（クレジットカード・利用明細）===" },
+    { "keywords": ["カード会社", "CARD COMPANY"], "category": "Finance", "document": "クレジットカード明細" },
+    { "keywords": ["ご利用明細", "ご利用明", "ご利用代金"], "category": "Finance", "document": "クレジットカード明細" },
+    { "keywords": ["三井住友カード", "三菱UFJカード", "楽天カード", "JCBカード"], "category": "Finance", "document": "クレジットカード明細" },
+    { "keywords": ["コストコ", "Costco"], "category": "Receipt", "document": "領収書", "counterparty": "コストコホールセールジャパン" }
   ]
 }

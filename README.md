@@ -53,6 +53,24 @@ document-flow-agent/
 完全自動化ではなく、**安全確認付き半自動運用**が基本方針です。  
 詳細は [`docs/workflow.md`](docs/workflow.md) を参照してください。
 
+```
+[Capture]  iPhone でスキャン → inbox/
+     ↓
+[Image Normalize]  .jpg/.png → PDF（processing/normalized/）
+     ↓
+[Split Multi-page PDF]  複数ページ PDF → 1ページ=1PDF（processing/splitted/）
+     ↓
+[OCR]  macOS Vision Framework で内容認識
+     ↓
+[Review / Auto-approved]  高信頼度は自動承認・要確認はレビュー UI
+     ↓
+[Apply]  rename + metadata 生成（processing/renamed/ or auto-approved/）
+     ↓
+[Export]  export/files/ へコピー
+     ↓
+[Archive Original Input]  inbox 原本 → archive/original-input/YYYYMM/
+```
+
 ### Step 1 — スキャン → inbox
 iPhone でスキャン後、`inbox/` に配置する。ファイル名・形式は自由。
 
@@ -64,17 +82,35 @@ python scripts/normalize_documents.py
 
 ファイル一覧・文字化け検出・リネームヒントを表示する（ファイルは動かさない）。
 
+### Step 2.5 — split（複数ページ PDF 分割）
+
+```bash
+python scripts/split_receipts.py                 # inbox の複数ページ PDF を一覧（dry-run）
+python scripts/split_receipts.py --apply         # 実際に分割して processing/splitted/ へ出力
+```
+
+複数領収証が 1 つの PDF にまとめてスキャンされている場合は、`split_receipts.py` で 1ページ = 1PDF に分割する。  
+`process_inbox.py` は自動的に複数ページ PDF を分割してから OCR する（`--no-split` で無効化）。
+
+- 分割先: `processing/splitted/`
+- 命名例: `20260522_receipts.pdf` → `20260522_receipts-p001.pdf`, `20260522_receipts-p002.pdf`
+- 元 PDF は inbox に保持（分割後 PDF は一時生成物）
+- 分割後 PDF の metadata に `split_source`, `split_page`, `split_pdf` フィールドを追加
+
 ### Step 3 — analyze / dry-run（OCR分析・レポート生成）
 
 ```bash
-python scripts/process_inbox.py                   # デフォルトは --dry-run + OCR
+python scripts/process_inbox.py                   # デフォルトは --dry-run + OCR + 自動分割
 python scripts/process_inbox.py --dry-run         # 同上
 python scripts/process_inbox.py --no-ocr          # OCR なしで高速実行
+python scripts/process_inbox.py --no-split        # 複数ページ PDF を分割しない
 python scripts/process_inbox.py --no-open-review  # レビュー画面を自動起動しない
 ```
 
-**`--dry-run` がデフォルト。ファイルは一切変更しない。**
+**`--dry-run` がデフォルト。ファイルコピーは行わない。**  
+※ 複数ページ PDF の分割ファイル（`processing/splitted/`）は dry-run でも生成される（OCR に必要なため）。
 
+- 複数ページ PDF を自動検出 → `processing/splitted/` に 1ページ = 1PDF として分割
 - **ファイル名ではなく PDF の中身を OCR して** rename 候補を生成（macOS Vision Framework 使用）
 - rename 候補フォーマット: `YYYYMMDD-Category-Document-Counterparty.pdf`
 - 文字化け疑い → `processing/ocr-error/` に JSON / Markdown / HTML レポートを生成
@@ -258,6 +294,7 @@ Category 一覧は [`docs/categories.md`](docs/categories.md)、支払手段は 
 |---|---|---|
 | `normalize_documents.py` | inbox のファイル一覧・文字化け検出 | 月次処理開始時 |
 | `normalize_images.py` | .jpg/.png を PDF へ変換（process_inbox から自動呼び出し） | process_inbox 内部 |
+| `split_receipts.py` | 複数ページ PDF を 1ページ=1PDF に分割（process_inbox から自動呼び出し） | process_inbox 内部 |
 | `process_inbox.py` | 分析・rename 候補・レポート生成 | normalize の次 |
 | `rename_documents.py` | 命名規約のファイル名生成・検証 | rename 時に参照 |
 | `generate_metadata.py` | metadata scaffold 生成 | renamed/ 配置後 |

@@ -26,6 +26,13 @@ PDF / 画像ファイル
        ↓
   正規化済み PDF（または元 PDF）
        |
+       | 複数ページ PDF の場合: scripts/split_receipts.py（pypdf）
+       |   processing/splitted/ に 1ページ = 1PDF として分割
+       |   元 PDF は inbox に保持（archive では元 PDF を保管）
+       |   --no-split オプションで無効化可能
+       ↓
+  分割済み 1ページ PDF（または単一ページ PDF）
+       |
        | sips（macOS 標準）で1ページ目を JPEG に変換
        ↓
   JPEG 画像
@@ -67,10 +74,16 @@ PDF / 画像ファイル
         |
         | 画像ファイル（.jpg/.png）は自動的に PDF へ正規化
         | → processing/normalized/ に一時保存（OCR 後は削除不要）
+        |
+        | 複数ページ PDF は自動的に 1ページ = 1PDF に分割
+        | → processing/splitted/ に一時保存
+        | → 元 PDF は inbox に保持（archive では元 PDF を保管）
+        | → --no-split で無効化可能
         ↓
 [Dry-run]  ← デフォルト。必ず先に実行する
   python scripts/process_inbox.py --dry-run
-  → rename 候補を表示（ファイルは変更しない）
+  → 複数ページ PDF を processing/splitted/ に分割（dry-run でも分割ファイルは生成）
+  → rename 候補を表示（renamed/ へのコピーは行わない）
   → OCR エラー検出 → processing/ocr-error/ にレポート
   → review 要否判定 → processing/review-required/ にレポート
   → ログ → logs/process-inbox-YYYYMMDD-HHMMSS.log

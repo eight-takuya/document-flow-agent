@@ -36,10 +36,69 @@ CATEGORY_KEYWORDS: List[tuple] = [
     ("School",     ["成績", "通知表", "学校", "入学", "授業料",
                     "探究ゼミ", "講師派遣", "職業講演会", "浦安高等学校", "浦安中学校"]),
     ("Utility",    ["使用水量", "水道料金", "電気料金", "ガス料金", "通信費", "下水道"]),
-    ("Receipt",    ["領収書", "レシート"]),
-    ("Expense",    ["会食", "交通費", "宿泊費"]),
+    # Finance: クレジットカード明細・利用明細
+    ("Finance",    ["カード会社", "CARD COMPANY", "ご利用明細", "クレジットカード",
+                    "会員番号", "ご利用代金", "請求金額", "お支払い金額"]),
+    # Receipt: レシート・領収書・タクシー・交通費領収書を含む
+    ("Receipt",    ["領収書", "レシート", "領収証",
+                    "タクシー", "個人タクシー", "ハイヤー"]),
     ("Other",      []),  # fallback
 ]
+
+# ---------------------------------------------------------------------------
+# 有効な年の範囲（日付バリデーション）
+# ---------------------------------------------------------------------------
+VALID_YEAR_MIN = 1900
+VALID_YEAR_MAX = 2099
+
+# ---------------------------------------------------------------------------
+# OCR 誤認識テキスト置換マップ
+# ---------------------------------------------------------------------------
+OCR_REPLACE_MAP: List[Tuple[str, str]] = [
+    # ホテル名
+    ("カン夕オ",           "カンデオ"),
+    ("カンダオ",           "カンデオ"),
+    ("カンデォ",           "カンデオ"),
+    ("カスピタリティ",     "ホスピタリティ"),
+    ("マコジメント",       "マネジメント"),
+    ("マヨジント",         "マネジメント"),
+    ("マネジュメント",     "マネジメント"),
+    # タクシー組合
+    ("日循漣",             "日個連"),
+    ("日衞連",             "日個連"),
+    ("日偲連",             "日個連"),
+    # コストコ
+    ("木ールセール",       "ホールセール"),
+    ("コールセール",       "ホールセール"),
+    # 役職名
+    ("代表取締後",         "代表取締役"),
+    ("代表取締按",         "代表取締役"),
+]
+
+# ---------------------------------------------------------------------------
+# document blocklist（無意味な文書名を除外）
+# ---------------------------------------------------------------------------
+DOCUMENT_BLOCKLIST = {
+    "001", "002", "003", "004", "005", "006", "007", "008", "009",
+    "株式会社", "有限会社", "合同会社", "",
+}
+
+# ---------------------------------------------------------------------------
+# counterparty ブロック: 住所・登録番号・QR 由来パターン
+# ---------------------------------------------------------------------------
+_ADDRESS_PATTERN = re.compile(
+    r"(〒\d{3}[-－]\d{4}"          # 郵便番号
+    r"|\d+丁目|\d+番地|番[0-9]|号室"  # 番地・丁目・号室
+    r"|[-－]\d{1,4}[-－]\d{1,4}"   # 住所番地ハイフン連続
+    r"|[0-9]{1,2}[－−-][0-9]{1,2}[－−-][0-9]{1,2}"  # X-Y-Z 形式
+    r"|浦安市[^\s]|江東区[^\s])"    # 具体的な住所地名（直後に文字が続く場合のみ）
+)
+_REGISTRATION_PATTERN = re.compile(
+    r"(登録番号|T\d{13}|法人番号|\d{13}|作成地[：:])"
+)
+_URL_PATTERN = re.compile(
+    r"(https?://|www\.|\.co\.jp|\.com|\.jp)"
+)
 
 # ---------------------------------------------------------------------------
 # 日本語元号 → 西暦変換
@@ -82,8 +141,14 @@ _GOVT_ENTITY_PATTERNS = [
 COUNTERPARTY_BLOCKLIST = [
     "登録商標", "QRコード", "コピーライト", "copyright", "Copyright",
     "無断複製", "無断転載", "All Rights", "registered",
-    "会社法人等番号",  # 履歴事項全部証明書でフィールドラベルが誤検知される
-    "代表取締役",      # 役職名そのものは取引先ではない
+    "会社法人等番号",   # 履歴事項全部証明書でフィールドラベルが誤検知される
+    "代表取締役",       # 役職名そのものは取引先ではない
+    "代表取締後",       # OCR 誤認識版
+    "登録番号",         # T始まり登録番号
+    "会員番号",         # クレカ会員番号ラベル
+    "作成地",           # 「作成地：○○」形式
+    "取引日時",         # レシートの取引日時ラベル
+    "会社名",           # クレカ明細のフィールドラベル
 ]
 
 # ファイル名に含まれる支払手段キーワード → 正規化名
@@ -171,8 +236,18 @@ def extract_text(file_path: Path) -> str:
 # Heuristic parsing of OCR text
 # ---------------------------------------------------------------------------
 
+def _is_valid_year(year: int) -> bool:
+    """年が有効な範囲（1900〜2099）かどうかを返す。"""
+    return VALID_YEAR_MIN <= year <= VALID_YEAR_MAX
+
+
 def _extract_date(text: str, fallback_filename: str) -> str:
-    """OCR テキストから日付を抽出し YYYYMMDD 形式で返す。"""
+    """
+    OCR テキストから日付を抽出し YYYYMMDD 形式で返す。
+    年が 1900〜2099 の範囲外の場合は無効とし次のパターンへ。
+    すべて無効な場合はファイル名先頭8桁にフォールバック
+    （ファイル名日付も年バリデーションを行う）。
+    """
     for pat in DATE_PATTERNS:
         m = pat.search(text)
         if m:
@@ -187,13 +262,21 @@ def _extract_date(text: str, fallback_filename: str) -> str:
             else:
                 continue
             try:
-                return f"{int(year):04d}{int(month):02d}{int(day):02d}"
+                year_int = int(year)
+                if not _is_valid_year(year_int):
+                    continue  # 1900-2099 範囲外はスキップ
+                return f"{year_int:04d}{int(month):02d}{int(day):02d}"
             except (ValueError, TypeError):
                 continue
 
-    # filename の先頭8桁にフォールバック
+    # filename の先頭8桁にフォールバック（年バリデーションあり）
     m = re.match(r"^(\d{8})", fallback_filename)
-    return m.group(1) if m else ""
+    if m:
+        date_str = m.group(1)
+        fn_year = int(date_str[:4])
+        if _is_valid_year(fn_year):
+            return date_str
+    return ""
 
 
 def _extract_category(text: str) -> str:
@@ -206,8 +289,26 @@ def _extract_category(text: str) -> str:
 
 
 def _is_counterparty_blocked(name: str) -> bool:
-    """ブロックリストに含まれる OCR ゴミテキストを弾く。"""
-    return any(blocked in name for blocked in COUNTERPARTY_BLOCKLIST)
+    """
+    ブロックリストに含まれる OCR ゴミテキストを弾く。
+    住所・登録番号・URL パターンも除外する。
+    """
+    if any(blocked in name for blocked in COUNTERPARTY_BLOCKLIST):
+        return True
+    if _ADDRESS_PATTERN.search(name):
+        return True
+    if _REGISTRATION_PATTERN.search(name):
+        return True
+    if _URL_PATTERN.search(name):
+        return True
+    return False
+
+
+def _apply_ocr_replace_map(text: str) -> str:
+    """OCR 誤認識テキストを正しい表記に置換する。"""
+    for wrong, correct in OCR_REPLACE_MAP:
+        text = text.replace(wrong, correct)
+    return text
 
 
 def _extract_govt_entity(text: str) -> str:
@@ -294,7 +395,8 @@ def _extract_document_name(text: str, category: str) -> str:
             "水道料金案内", "水道料金のお知らせ", "水道料金促状",
             "使用水量のお知らせ", "電気ご使用量のお知らせ", "ガス使用量のお知らせ",
         ],
-        "Receipt": ["領収書"],
+        "Receipt": ["領収書", "領収証"],
+        "Finance": ["クレジットカード明細", "ご利用明細", "ご利用代金明細書"],
         "Other": [],
     }
     for kw in doc_keywords.get(category, []):
@@ -313,20 +415,29 @@ def parse_rename_fields(
 
     優先順位:
     - 日付: ファイル名の YYYYMMDD を最優先。日付のみファイル名のときのみ OCR 日付を使用
+            ※ 年が 1900〜2099 の範囲外はファイル名・OCR ともに無効とする
     - Category: OCR テキスト → ファイル名テキストの順で判定
-    - Document: OCR テキスト → ファイル名から推定
-    - Counterparty: Bracket tag → OCR テキスト
+    - Document: OCR テキスト → ファイル名から推定（blocklist に該当するものは除外）
+    - Counterparty: Bracket tag → OCR テキスト（住所・登録番号は除外）
     """
     tags = bracket_tags or []
 
-    # --- 日付: ファイル名を最優先 ---
+    # --- OCR テキスト前処理: 誤認識を正規表現で置換 ---
+    ocr_text = _apply_ocr_replace_map(ocr_text)
+
+    # --- 日付: ファイル名を最優先（年バリデーションあり）---
     filename_date = re.match(r"^(\d{8})", source_filename)
     stem = Path(source_filename).stem
-    if filename_date and stem != filename_date.group(1):
-        # ファイル名に日付 + 他のテキストがある → ファイル名の日付を使う
+    fn_date_valid = False
+    if filename_date:
+        fn_year = int(filename_date.group(1)[:4])
+        fn_date_valid = _is_valid_year(fn_year)
+
+    if fn_date_valid and stem != filename_date.group(1):
+        # ファイル名に日付 + 他のテキストがある、かつ年が有効 → ファイル名の日付を使う
         date = filename_date.group(1)
     else:
-        # 日付のみファイル名 or 日付なし → OCR から取得
+        # 日付のみファイル名 or 日付なし or 年が範囲外 → OCR から取得
         date = _extract_date(ocr_text, source_filename)
 
     # --- Category: OCR → ファイル名順 ---
@@ -345,8 +456,14 @@ def parse_rename_fields(
         # ファイル名の日付/タグを除いた部分を document として使う
         doc_from_name = re.sub(r"【[^】]+】", "", stem)
         doc_from_name = re.sub(r"^\d{8}[_\-]?", "", doc_from_name).strip("-_")
+        # split ページ suffix (-p001 など) を除去
+        doc_from_name = re.sub(r"-p\d{3}$", "", doc_from_name)
         if doc_from_name:
-            document = doc_from_name[:30]
+            document = doc_from_name[:25]  # 25文字上限（長文タイトルを短縮）
+
+    # --- Document blocklist: 無意味な文書名を除外 ---
+    if document in DOCUMENT_BLOCKLIST:
+        document = ""
 
     # --- Payment method: ファイル名から抽出 ---
     payment_method = ""
@@ -365,13 +482,25 @@ def parse_rename_fields(
     }
 
 
+# categories.md に定義された有効カテゴリ一覧
+# "Expense" などの非標準 category が混入した場合は "Other" に正規化する
+VALID_CATEGORIES = {
+    "Work", "Contract", "Government", "Tax", "Insurance",
+    "Medical", "School", "Utility", "Finance", "Receipt", "Other",
+}
+
+
 def build_ocr_rename_candidate(fields: Dict) -> str:
     """
     parse_rename_fields の結果から rename 候補ファイル名を生成する。
     Category が確定していない部分は [要確認] を残す。
+    非標準 category（Expense 等）は Other に正規化する。
     """
     date = fields.get("date") or "[日付不明]"
     category = fields.get("category") or "Other"
+    # 非標準 category を正規化
+    if category not in VALID_CATEGORIES:
+        category = "Other"
     document = fields.get("document") or "[Document要確認]"
     counterparty = fields.get("counterparty", "")
     amount_jpy = fields.get("amount_jpy")
